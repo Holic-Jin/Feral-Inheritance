@@ -115,6 +115,9 @@ HARD_DENIED_GLOBS = [
 
 TASK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
 BRANCH_PREFIX = "model/"
+# model/<task-id>-<UTC timestamp>, timestamp from time.strftime("%Y%m%dT%H%M%SZ", gmtime).
+# Job B of model-call.yml hard-codes this same pattern and refuses any other ref.
+MODEL_BRANCH_RE = re.compile(r"^model/[a-z0-9][a-z0-9_-]{0,47}-[0-9]{8}T[0-9]{6}Z$")
 
 SAFE_PATH_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._\-]*(/[A-Za-z0-9_][A-Za-z0-9._\-]*)*$")
 
@@ -620,6 +623,27 @@ def check_task_id(task_id):
 def branch_name(task_id, now):
     """model/<task-id>-<UTC timestamp>, e.g. model/fix-tox-cloud-20261026T091500Z."""
     return "%s%s-%s" % (BRANCH_PREFIX, task_id, time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now)))
+
+
+def dispatch_outputs(record):
+    """(branch, pr_number) for the test-dispatch job, or ("", "") when there is nothing to test.
+
+    Only outcome ``pr_opened`` created a remote branch and a PR. Dry runs, local
+    commits and refusals return empty strings so model-call does not dispatch test.yml.
+    The branch pattern itself is checked again in the dispatch job, which has no checkout.
+    """
+    if not isinstance(record, dict) or record.get("outcome") != "pr_opened":
+        return "", ""
+    branch = record.get("branch") or ""
+    pr_url = record.get("pr") or ""
+    if not isinstance(branch, str) or not isinstance(pr_url, str):
+        raise GitError("pr_opened log has a non-string branch or pr", "pr_outputs")
+    if any(c in branch for c in "\r\n"):
+        raise GitError("pr_opened branch contains a newline", "pr_outputs")
+    match = re.search(r"/pull/(\d+)$", pr_url)
+    if not branch or not match:
+        raise GitError("pr_opened log is missing a branch or PR number", "pr_outputs")
+    return branch, match.group(1)
 
 
 def start_fresh_branch(repo_root, task_id, base, clock=time.time, token=None):

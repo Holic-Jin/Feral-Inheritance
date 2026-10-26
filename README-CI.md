@@ -46,7 +46,8 @@ commands and never sees secrets. Nothing merges automatically; the owner merges.
       written to `$RUNNER_TEMP/gateway/calls.jsonl` and printed to the run's **step summary** as a
       token-usage table plus the raw JSONL. `actions/upload-artifact` is not used yet because it has not
       been reviewed.
-3. The **test** workflow checks the PR. See the known limitation below.
+3. Job B of **model-call** dispatches **test.yml** on that branch. See "Test dispatch" below.
+   `test.yml` itself is unchanged: `pull_request`, `push` to `main`, and `workflow_dispatch`.
 4. QA reviews. The owner decides and merges.
 
 Exit codes: 0 ok, 2 policy refusal (FinisMundi, allowlist, secret, rate limit, task_id), 3 model/API error,
@@ -178,13 +179,39 @@ release notes on every bump.
 6. Accept the NVIDIA API Trial Terms. Prompts may be used to improve NVIDIA models, so send no
    confidential data.
 
-**Known limitation:** PRs opened with the workflow's `GITHUB_TOKEN` do **not** trigger `pull_request`
-workflows, because of GitHub's recursion guard. So `test (1.6)` and `test (1.7)` do not start by themselves on
-gateway PRs. To get the checks, do one of these:
+## Test dispatch
 
-- Run **Actions → test → Run workflow** on the `model/...` branch. The checks attach to its head commit.
-- Close and reopen the PR.
-- Later, approve giving `model-call` the `actions: write` permission so it can dispatch `test.yml` itself.
+PRs opened with the workflow `GITHUB_TOKEN` do not start `pull_request` workflows by themselves
+(GitHub's recursion guard). `workflow_dispatch` is the documented exception: a `GITHUB_TOKEN` request
+that creates a workflow dispatch **does** start a run. See
+[Triggering a workflow from a workflow](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow).
+`POST /repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches` accepts the workflow file name
+as `{workflow_id}` and requires the **Actions: write** permission
+([permissions required for GitHub Apps](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps)).
+
+`model-call.yml` sets workflow-level `permissions: {}`. The two jobs ask only for what they use:
+
+| Job | id | Token | Secrets | What it does |
+|---|---|---|---|---|
+| A | `gateway` | `contents: write`, `pull-requests: write` | `NVIDIA_API_KEY` only | The existing gateway. On `pr_opened` it publishes the branch name and the PR number as job outputs. A dry run, a refusal, or any run that did not open a PR leaves the branch output empty. |
+| B | `dispatch-tests` | `actions: write` only | none, and no checkout | `needs: gateway`, and runs only when `success() && needs.gateway.outputs.branch != ''`. |
+
+Job B checks the branch against `model/<task-id>-<UTC timestamp>` (`task-id` is
+`^[a-z0-9][a-z0-9_-]{0,47}$`, timestamp `YYYYMMDDTHHMMSSZ`, the same shape as
+`branch_name()`). Any other ref fails the job. It then calls, with `GITHUB_TOKEN` via curl:
+
+```
+POST /repos/${{ github.repository }}/actions/workflows/test.yml/dispatches
+{"ref": "<that branch>"}
+```
+
+The workflow file name `test.yml` is hard-coded in that URL, so this job cannot start another
+workflow. The run checks out the branch head. Because a model diff cannot touch `.github/`, the
+`test.yml` on that branch is the copy inherited from `main`. The check names on that SHA stay
+**`test (1.6)`** and **`test (1.7)`**.
+
+A manual **Actions → test → Run workflow** on the branch still works. `test.yml` is otherwise
+unchanged: `permissions: contents: read`, no secrets, no `pull_request_target`.
 
 ## Not in this repository
 

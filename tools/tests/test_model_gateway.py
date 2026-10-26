@@ -683,5 +683,89 @@ class TestFreshBranch(Base):
             gw.parse_args(["--task", "x"])
 
 
+class TestDispatchOutputs(unittest.TestCase):
+    def test_only_opened_pr_is_exposed(self):
+        branch, pr = gw.dispatch_outputs({
+            "outcome": "pr_opened",
+            "branch": "model/fix-tox-20261026T091500Z",
+            "pr": "https://github.com/Holic-Jin/Feral-Inheritance/pull/12",
+        })
+        self.assertEqual(branch, "model/fix-tox-20261026T091500Z")
+        self.assertEqual(pr, "12")
+
+    def test_dry_run_local_commit_and_refusal_dispatch_nothing(self):
+        for outcome in ("dry_run", "committed_local", "refused_task_id", "rejected_path"):
+            with self.subTest(outcome=outcome):
+                self.assertEqual(
+                    gw.dispatch_outputs({"outcome": outcome, "branch": "model/t1-20261026T091500Z",
+                                         "pr": "https://github.com/Holic-Jin/Feral-Inheritance/pull/3"}),
+                    ("", ""))
+        self.assertEqual(gw.dispatch_outputs(None), ("", ""))
+        self.assertEqual(gw.dispatch_outputs({}), ("", ""))
+
+    def test_pr_opened_without_number_or_with_newline_fails(self):
+        with self.assertRaises(gw.GitError):
+            gw.dispatch_outputs({"outcome": "pr_opened", "branch": "model/t1-20261026T091500Z", "pr": ""})
+        with self.assertRaises(gw.GitError):
+            gw.dispatch_outputs({"outcome": "pr_opened", "branch": "model/t1-20261026T091500Z\nmain",
+                                 "pr": "https://github.com/Holic-Jin/Feral-Inheritance/pull/1"})
+
+    def test_branch_name_matches_dispatch_pattern(self):
+        samples = [
+            gw.branch_name("fix-tox", 1793000000),
+            gw.branch_name("t1", 1793000001),
+            gw.branch_name("fi-0001_ab", 1793000000),
+            gw.branch_name("a", 1793000000),
+            gw.branch_name("a" * 48, 1793000000),
+        ]
+        for branch in samples:
+            with self.subTest(branch=branch):
+                self.assertRegex(branch, gw.MODEL_BRANCH_RE)
+        for bad in ("", "main", "model/main", "model/Upper-20261026T073320Z",
+                    "model/t1-20261026T073320Z;rm", "model/../../../etc", "refs/heads/main",
+                    "model/t1-20261026T073320", "model/t1-20261026t073320Z",
+                    "model/" + ("a" * 49) + "-20261026T073320Z"):
+            with self.subTest(bad=bad):
+                self.assertIsNone(gw.MODEL_BRANCH_RE.fullmatch(bad))
+
+
+class TestWorkflowContract(unittest.TestCase):
+    def test_model_call_dispatches_only_test_yml(self):
+        path = os.path.join(REPO, ".github", "workflows", "model-call.yml")
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+        self.assertIn("\npermissions: {}\n", text)
+        self.assertEqual(text.count(gw.MODEL_BRANCH_RE.pattern), 1)
+        self.assertIn('pat = re.compile(r"%s")' % gw.MODEL_BRANCH_RE.pattern, text)
+        self.assertIn("/actions/workflows/test.yml/dispatches", text)
+        self.assertNotIn("workflows/${{", text)
+        gateway, dispatch = text.split("\n  dispatch-tests:\n", 1)
+        self.assertIn("contents: write", gateway)
+        self.assertIn("pull-requests: write", gateway)
+        self.assertIn("NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}", gateway)
+        self.assertNotIn("actions: write", gateway)
+        self.assertIn("needs: gateway", dispatch)
+        self.assertIn("success() && needs.gateway.outputs.branch != ''", dispatch)
+        self.assertIn("actions: write", dispatch)
+        self.assertNotIn("secrets.", dispatch)
+        self.assertNotIn("actions/checkout", dispatch)
+        self.assertNotIn("git init", dispatch)
+        self.assertNotIn("NVIDIA", dispatch)
+        header = dispatch.split("steps:", 1)[0]
+        self.assertNotIn("contents:", header)
+        self.assertNotIn("pull-requests:", header)
+
+    def test_test_workflow_stays_read_only(self):
+        path = os.path.join(REPO, ".github", "workflows", "test.yml")
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+        self.assertIn("\npermissions:\n  contents: read\n", text)
+        self.assertNotIn("pull_request_target:", text)
+        self.assertNotIn("${{ secrets.", text)
+        self.assertIn("workflow_dispatch:", text)
+        self.assertIn("name: test (${{ matrix.rimworld }})", text)
+        self.assertIn('rimworld: ["1.6", "1.7"]', text)
+
+
 if __name__ == "__main__":
     unittest.main()

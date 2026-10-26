@@ -1,8 +1,14 @@
 # Model call workflow: owner-triggered only (workflow_dispatch from main).
-# Calls the NVIDIA API through tools/model_gateway.py, which cuts a fresh branch
-# model/<task_id>-<UTC timestamp> from the latest origin/main, applies the returned
-# diff (allowed paths only), pushes that branch and opens a draft PR.
-# Tests run in the separate test.yml workflow (no secrets, read-only).
+# Job A (gateway) calls the NVIDIA API through tools/model_gateway.py, which cuts a
+# fresh branch model/<task_id>-<UTC timestamp> from the latest origin/main, applies
+# the returned diff (allowed paths only), pushes that branch and opens a draft PR.
+# Job B (dispatch-tests) then starts .github/workflows/test.yml on that branch.
+#
+# workflow_dispatch from GITHUB_TOKEN is a documented exception to the recursion
+# guard: it always creates a workflow run.
+# https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow
+# The dispatch endpoint requires Actions: write and accepts the workflow file name.
+# https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event
 name: model-call
 
 on:
@@ -32,9 +38,8 @@ on:
         type: boolean
         default: false
 
-permissions:
-  contents: write
-  pull-requests: write
+# No inherited write scope. Each job sets only the permissions it uses.
+permissions: {}
 
 # One gateway run at a time, so parallel runs cannot exceed the 40 calls/minute limit
 # (the rate-limit state file lives only for the length of one job).
@@ -43,8 +48,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Job A. Sees the NVIDIA key. Its token cannot dispatch workflows.
   gateway:
     name: model-call
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      branch: ${{ steps.publish.outputs.branch }}
+      pr: ${{ steps.publish.outputs.pr }}
     # only the reviewed gateway on main may run
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
@@ -88,3 +100,63 @@ jobs:
           echo '```json' >> "$GITHUB_STEP_SUMMARY"
           cat "${RUNNER_TEMP}/gateway/calls.jsonl" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Expose created branch and PR number
+        id: publish
+        env:
+          CALL_LOG: ${{ runner.temp }}/gateway/calls.jsonl
+        run: |
+          set -euo pipefail
+          python3 - << 'PY'
+          import json, os, sys
+          sys.path.insert(0, "tools")
+          import model_gateway as gw
+          last = None
+          with open(os.environ["CALL_LOG"], encoding="utf-8") as handle:
+              for line in handle:
+                  line = line.strip()
+                  if line:
+                      last = json.loads(line)
+          branch, pr = gw.dispatch_outputs(last)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write("branch=%s\n" % branch)
+              handle.write("pr=%s\n" % pr)
+          if branch:
+              print("dispatch outputs: branch set, pr=%s" % pr)
+          else:
+              print("no PR branch; test.yml will not be dispatched")
+          PY
+
+  # Job B. No secrets, no checkout. Can start only the hard-coded test.yml workflow.
+  dispatch-tests:
+    name: dispatch test.yml
+    needs: gateway
+    if: success() && needs.gateway.outputs.branch != ''
+    permissions:
+      actions: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch test.yml on the model branch
+        env:
+          DISPATCH_REF: ${{ needs.gateway.outputs.branch }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - << 'PY'
+          import os, re, sys
+          branch = os.environ.get("DISPATCH_REF", "")
+          pat = re.compile(r"^model/[a-z0-9][a-z0-9_-]{0,47}-[0-9]{8}T[0-9]{6}Z$")
+          if pat.fullmatch(branch) is None:
+              print("::error::refusing to dispatch: branch is not model/<task-id>-<UTC timestamp>", file=sys.stderr)
+              sys.exit(1)
+          PY
+          payload=$(python3 -c 'import json,os; print(json.dumps({"ref": os.environ["DISPATCH_REF"]}))')
+          curl --fail-with-body -sS -X POST \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/json" \
+            --data "$payload" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/test.yml/dispatches"
+          echo "dispatched test.yml"
