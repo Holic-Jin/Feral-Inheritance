@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    빌드: dotnet build -c Release
+    net472  -> ../1.6/Assemblies (RimWorld 1.6, Harmony 2.x)
+    net10.0 -> ../1.7/Assemblies (RimWorld 1.7 Waylith, Harmony 3.x)
+
+    CI conditions (csharp-tools-review.md, approved 2026-10-26):
+    - restore only via packages.lock.json (RestorePackagesWithLockFile) + `dotnet restore` in locked mode in CI
+      (exact versions, no ranges / wildcards)
+    - nuget.org only (nuget.config packageSourceMapping + trustedSigners)
+    - all package references are compile-time references only: ExcludeAssets="runtime" + PrivateAssets="all",
+      so no reference assembly is copied to the build output (Harmony runtime comes from the Harmony mod)
+    - NOTE: Lib.Harmony 3.0.0-rc.3 (net10.0 / RimWorld 1.7) is a PRE-RELEASE (release candidate built from a
+      work branch), and Krafs.Rimworld.Ref 1.7.4985-unstable is a pre-release too. Re-check both on every bump.
+  -->
+  <PropertyGroup>
+    <TargetFrameworks>net472;net10.0</TargetFrameworks>
+    <AssemblyName>FeralInheritance</AssemblyName>
+    <RootNamespace>FeralInheritance</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <GenerateDependencyFile>false</GenerateDependencyFile>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <DebugType>none</DebugType>
+    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <Deterministic>true</Deterministic>
+    <!-- package assemblies are compile-time references only; never copy them next to our DLL -->
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net472'">
+    <OutputPath>../1.6/Assemblies/</OutputPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net10.0'">
+    <OutputPath>../1.7/Assemblies/</OutputPath>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net472'">
+    <PackageReference Include="Krafs.Rimworld.Ref" Version="1.6.4871" ExcludeAssets="runtime" PrivateAssets="all" />
+    <PackageReference Include="Lib.Harmony" Version="2.4.2" ExcludeAssets="runtime" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
+    <PackageReference Include="Krafs.Rimworld.Ref" Version="1.7.4985-unstable" ExcludeAssets="runtime" PrivateAssets="all" />
+    <PackageReference Include="Lib.Harmony" Version="3.0.0-rc.3" ExcludeAssets="runtime" PrivateAssets="all" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Defs>
+  <!-- 「야수의 계승」 유전자 (Biotech 전용). 특성 또는 유전자 중 하나만 있으면 습득 자격. 전투 보너스 없음.
+       0.9.1: 초월입자(archite) 유전자 — 이식(유전자 조합기)에 초월입자 캡슐(ArchiteCapsule) 1개 필요.
+       바닐라 초월입자 유전자처럼 대사 0, 복잡도 3, 초월입자 1 (예: 노화 정지·완벽 면역 = 0 / 3 / 1).
+       초월입자 유전자는 추출 불가·유전 안 됨(바닐라 규칙). 유전자묶음 생성 가중치 0.5.
+       습격자: 모드 설정 확률로 변형인자(xenogene)로 부여 (C#). 아이콘은 C#에서 폭탄사슴 그래픽 -->
+  <GeneDef>
+    <defName>FI_FeralInheritanceGene</defName>
+    <label>feral inheritance</label>
+    <labelShortAdj>feral</labelShortAdj>
+    <description>Carriers of this gene have archites in their nervous system that let them absorb the special abilities of monsters they kill. Abilities are never absorbed from humans.</description>
+    <displayCategory>Archite</displayCategory>
+    <displayOrderInCategory>900</displayOrderInCategory>
+    <biostatCpx>3</biostatCpx>
+    <biostatMet>0</biostatMet>
+    <biostatArc>1</biostatArc>
+    <selectionWeight>0.5</selectionWeight>
+    <canGenerateInGeneSet>true</canGenerateInGeneSet>
+  </GeneDef>
+</Defs>

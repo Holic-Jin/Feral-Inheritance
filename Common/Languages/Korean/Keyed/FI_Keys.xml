@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LanguageData>
+  <FI_LearnedAbility>{PAWN_labelShort}이(가) {SOURCE_label}을(를) 처치하고 「{ABILITY}」 능력을 배웠습니다. ({TIER}단계)</FI_LearnedAbility>
+  <FI_TierUp>{PAWN_labelShort}의 「{ABILITY}」 능력이 {TIER}단계가 되었습니다. 재사용 대기시간이 짧아집니다.</FI_TierUp>
+  <FI_GizmoLabel>{ABILITY} ({TIER}단계)</FI_GizmoLabel>
+  <FI_TierInfo>현재 {TIER}단계 · {SOURCE} 처치 {KILLS}회</FI_TierInfo>
+  <FI_TierNext>다음 단계까지 {REMAIN}회 더 처치</FI_TierNext>
+  <FI_TierMax>최고 단계 (3단계)</FI_TierMax>
+  <FI_TierLocked>이 능력은 1단계로 고정됩니다.</FI_TierLocked>
+  <FI_Settings_Header>능력별 단계 기준 (같은 종 누적 처치 수)</FI_Settings_Header>
+  <FI_Settings_T1>1단계 습득에 필요한 처치 수</FI_Settings_T1>
+  <FI_Settings_T2>2단계에 필요한 누적 처치 수</FI_Settings_T2>
+  <FI_Settings_T3>3단계에 필요한 누적 처치 수</FI_Settings_T3>
+  <FI_Settings_Invalid>주의: 1단계 ≤ 2단계 ≤ 3단계 순서여야 합니다. 창을 닫으면 자동으로 맞춰집니다.</FI_Settings_Invalid>
+  <FI_Settings_Note>최소 1, 최대 999, 1단계 ≤ 2단계 ≤ 3단계. 바꾼 값은 진행 중인 게임에도 바로 적용됩니다(쌓인 처치 수로 단계 재계산). 다른 DLC를 켜면 그 능력도 목록에 자동으로 나옵니다.</FI_Settings_Note>
+  <FI_Settings_ResetAll>전체 기본값으로</FI_Settings_ResetAll>
+  <FI_Settings_ResetOne>이 능력만 기본값으로</FI_Settings_ResetOne>
+  <FI_Settings_AbilityHeader>【{ABILITY}】 ({SOURCE} 처치) · 기본값 {D1} / {D2} / {D3}</FI_Settings_AbilityHeader>
+  <FI_Settings_TraitCommonality>「야수의 계승」 특성 등장 확률: {VALUE}</FI_Settings_TraitCommonality>
+  <FI_Settings_TraitCommonalityTip>0 = 자연 등장 안 함, 기본 0.3, 최대 5. 다른 특성의 등장 가중치와 비교되는 값입니다. 이미 생성된 정착민에게는 영향 없음.</FI_Settings_TraitCommonalityTip>
+  <FI_Settings_TraitCommonalityReset>등장 확률 기본값으로 (0.3)</FI_Settings_TraitCommonalityReset>
+  <FI_Stat_CurrentTier>현재 단계</FI_Stat_CurrentTier>
+  <FI_Stat_TierValue>{TIER}단계 (처치 {KILLS}회, {PAWN})</FI_Stat_TierValue>
+  <FI_Stat_CurrentTierDesc>선택한 정착민의 현재 단계입니다. 위 「재사용 대기시간」도 이 단계 값입니다.</FI_Stat_CurrentTierDesc>
+  <FI_Stat_TierRow>{TIER}단계</FI_Stat_TierRow>
+  <FI_Stat_TierRowValue>대기 {COOLDOWN} · 누적 처치 {KILLS}회</FI_Stat_TierRowValue>
+  <FI_Stat_TierRowDesc>단계별 재사용 대기시간과 필요한 같은 종 누적 처치 수 (모드 설정 반영).</FI_Stat_TierRowDesc>
+  <FI_Settings_RaiderChance>습격자가 「야수의 계승」 유전자를 가질 확률: {VALUE}</FI_Settings_RaiderChance>
+  <FI_Settings_RaiderChanceTip>Biotech 필요. 적대 세력 습격자 한 명마다 이 확률로 유전자와 배울 수 있는 능력 1개(1단계 고정)를 가지고 옵니다. 기본 2%, 최대 20%, 0이면 끔.</FI_Settings_RaiderChanceTip>
+  <FI_Settings_RaiderChanceReset>습격자 확률 기본값으로 (2%)</FI_Settings_RaiderChanceReset>
+</LanguageData>

@@ -1,0 +1,90 @@
+# Model call workflow: owner-triggered only (workflow_dispatch from main).
+# Calls the NVIDIA API through tools/model_gateway.py, which cuts a fresh branch
+# model/<task_id>-<UTC timestamp> from the latest origin/main, applies the returned
+# diff (allowed paths only), pushes that branch and opens a draft PR.
+# Tests run in the separate test.yml workflow (no secrets, read-only).
+name: model-call
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: "Task ID: lowercase letters, digits, - or _ (max 48). Used in the branch name and the call log"
+        required: true
+        type: string
+      task:
+        description: "Task for the model (plain text; never put secrets here)"
+        required: true
+        type: string
+      files:
+        description: "Context files, space/comma separated (Source/**/*.cs and Defs/Patches/Languages XML only)"
+        required: false
+        type: string
+        default: ""
+      model:
+        description: "NVIDIA model id (empty = default_model in tools/gateway_config.json)"
+        required: false
+        type: string
+        default: ""
+      dry_run:
+        description: "Dry run (no network calls, no branch, no PR)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# One gateway run at a time, so parallel runs cannot exceed the 40 calls/minute limit
+# (the rate-limit state file lives only for the length of one job).
+concurrency:
+  group: model-call
+  cancel-in-progress: false
+
+jobs:
+  gateway:
+    name: model-call
+    # only the reviewed gateway on main may run
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout main (plain git, no third-party action)
+        # actions/checkout is not used (no reputation review in csharp-tools-review.md).
+        # No credentials are stored; the gateway passes GITHUB_TOKEN to git per command.
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch -q --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          git checkout -q --detach refs/remotes/origin/main
+          git log -1 --format='gateway code from main %H'
+
+      - name: Run model gateway
+        # Inputs reach the script only through env (never interpolated into the shell) to
+        # avoid script injection. The key is only in env; the gateway never prints it.
+        env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GW_TASK_ID: ${{ inputs.task_id }}
+          GW_TASK: ${{ inputs.task }}
+          GW_FILES: ${{ inputs.files }}
+          GW_MODEL: ${{ inputs.model }}
+          GW_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/gateway"
+          python3 tools/model_gateway.py --project feral-inheritance --from-env \
+            --log-file "${RUNNER_TEMP}/gateway/calls.jsonl"
+
+      - name: Call log and token usage (step summary)
+        # The job is ephemeral, so the call log is kept as the run's step summary.
+        # actions/upload-artifact is NOT used: it has no review in csharp-tools-review.md.
+        # (Resolved for later review: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0)
+        # The log has metadata only: task_id, timestamp, model, prompt_sha256, token usage, outcome.
+        if: always()
+        run: |
+          python3 tools/model_gateway.py --summarize-log "${RUNNER_TEMP}/gateway/calls.jsonl" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat "${RUNNER_TEMP}/gateway/calls.jsonl" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

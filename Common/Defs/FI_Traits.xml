@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Defs>
+  <TraitDef>
+    <defName>FI_FeralInheritance</defName>
+    <commonality>0.3</commonality>
+    <degreeDatas>
+      <li>
+        <label>feral inheritance</label>
+        <description>{PAWN_nameDef} can absorb the special abilities of monsters {PAWN_pronoun} kills. Abilities are never absorbed from humans.</description>
+      </li>
+    </degreeDatas>
+  </TraitDef>
+</Defs>

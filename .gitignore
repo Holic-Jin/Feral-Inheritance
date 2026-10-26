@@ -1,0 +1,30 @@
+# Build output (never commit compiled assemblies)
+bin/
+obj/
+*.dll
+*.pdb
+*.exe
+.vs/
+*.user
+*.suo
+
+# Model gateway state: call ledger (JSONL), rate-limit state, logs
+.gateway/
+*.log
+logs/
+calls.jsonl
+
+# Python
+__pycache__/
+*.pyc
+
+# Local env / secrets
+.env
+.env.*
+
+# NuGet package folders / restore caches (reference assemblies must never be committed)
+*.nupkg
+*.snupkg
+packages/
+.nuget/
+TestResults/

@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "dependencies": {
+    ".NETFramework,Version=v4.7.2": {
+      "Krafs.Rimworld.Ref": {
+        "type": "Direct",
+        "requested": "[1.6.4871, )",
+        "resolved": "1.6.4871",
+        "contentHash": "aKebbihZfq47VI9UgyEdrnYslEDeMK3l9+QwC21zL6noJCOLlr5D4+jvhP/F5UA9q+9YVkuTx3NH3eJ03/ivlA=="
+      },
+      "Lib.Harmony": {
+        "type": "Direct",
+        "requested": "[2.4.2, )",
+        "resolved": "2.4.2",
+        "contentHash": "D2X9ojVjqbqdqWVK3VQETrEb56yVoXxtEp6tP5UvW0PP+bA4uJiswqOxF8GhH02ECwyevUa9vwhwdLzyXfksbw=="
+      },
+      "Microsoft.NETFramework.ReferenceAssemblies": {
+        "type": "Direct",
+        "requested": "[1.0.3, )",
+        "resolved": "1.0.3",
+        "contentHash": "vUc9Npcs14QsyOD01tnv/m8sQUnGTGOw1BCmKcv77LBJY7OxhJ+zJF7UD/sCL3lYNFuqmQEVlkfS4Quif6FyYg==",
+        "dependencies": {
+          "Microsoft.NETFramework.ReferenceAssemblies.net472": "1.0.3"
+        }
+      },
+      "Microsoft.NETFramework.ReferenceAssemblies.net472": {
+        "type": "Transitive",
+        "resolved": "1.0.3",
+        "contentHash": "0E7evZXHXaDYYiLRfpyXvCh+yzM2rNTyuZDI+ZO7UUqSc6GfjePiXTdqJGtgIKUwdI81tzQKmaWprnUiPj9hAw=="
+      }
+    },
+    "net10.0": {
+      "Krafs.Rimworld.Ref": {
+        "type": "Direct",
+        "requested": "[1.7.4985-unstable, )",
+        "resolved": "1.7.4985-unstable",
+        "contentHash": "TNXO8HOclZaI6xtxmOGFQBsdxRx1iGS9pfEh1XI22K0lnkiSeUomeJ+hHHZsEF6WLfzVtiiIH5R/zbVynk5V3w=="
+      },
+      "Lib.Harmony": {
+        "type": "Direct",
+        "requested": "[3.0.0-rc.3, )",
+        "resolved": "3.0.0-rc.3",
+        "contentHash": "bW1UU49jqW9w5NxdTs7G+h7Nyi9FGs4cX4lHN3rP7+q62zwLk+cO4ypD/cRboAeq5jtgACt7u37o2KAE+O0RNg=="
+      }
+    }
+  }
+}

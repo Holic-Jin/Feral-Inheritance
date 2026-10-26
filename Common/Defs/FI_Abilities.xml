@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Defs>
+  <!-- 모든 Feral Inheritance 능력의 공통 부모 (0.9.1). 새 능력은 이 부모(또는 아래 FI_SelfBlastBase)를 상속.
+       공통 시전(준비) 시간 0.5초 = 30틱 (Holic 결정). 실제 쿨다운은 FeralSourceDef의 단계별 값으로 덮어씀.
+       aiCanUse=false: 바닐라 AI 경로는 쓰지 않음. 비플레이어(습격자) 시전은 FeralAbility.AbilityTick의 자체 판단 -->
+  <AbilityDef Name="FI_AbilityBase" Abstract="True">
+    <abilityClass>FeralInheritance.FeralAbility</abilityClass>
+    <hostile>true</hostile>
+    <casterMustBeCapableOfViolence>true</casterMustBeCapableOfViolence>
+    <aiCanUse>false</aiCanUse>
+    <writeCombatLog>true</writeCombatLog>
+    <verbProperties>
+      <verbClass>Verb_CastAbility</verbClass>
+      <warmupTime>0.5</warmupTime>
+      <violent>true</violent>
+    </verbProperties>
+  </AbilityDef>
+
+  <!-- 자기 중심 발동(대상 지정 없음) — 바닐라 Neuroquake와 같은 방식
+       targetRequired=false + verbProperties.targetable=false + targetParams.canTargetSelf=true -->
+  <AbilityDef Name="FI_SelfBlastBase" ParentName="FI_AbilityBase" Abstract="True">
+    <targetRequired>false</targetRequired>
+    <verbProperties>
+      <requireLineOfSight>false</requireLineOfSight>
+      <drawAimPie>false</drawAimPie>
+      <targetable>false</targetable>
+      <targetParams>
+        <canTargetSelf>true</canTargetSelf>
+      </targetParams>
+    </verbProperties>
+  </AbilityDef>
+
+  <!-- 폭탄사슴(Boomalope): 성체 사망 폭발 반경 4.9 -->
+  <AbilityDef ParentName="FI_SelfBlastBase" Class="FeralInheritance.FeralAbilityDef">
+    <defName>FI_BoomalopeFireBurst</defName>
+    <label>boomalope fire burst</label>
+    <description>Release a burst of volatile chemicals from the body, causing a large flame explosion around the caster (4.9 cells) like a dying adult boomalope. The caster is unharmed, but nearby allies are hit.</description>
+    <cooldownTicksRange>780000~780000</cooldownTicksRange>
+    <verbProperties>
+      <range>4.9</range>
+    </verbProperties>
+    <comps>
+      <li Class="FeralInheritance.CompProperties_AbilityFireBurst">
+        <radius>4.9</radius>
+        <damAmount>-1</damAmount>
+      </li>
+    </comps>
+  </AbilityDef>
+
+  <!-- 폭탄쥐(Boomrat): 사망 폭발 반경 1.9 (DeathActionWorker_SmallExplosion) -->
+  <AbilityDef ParentName="FI_SelfBlastBase" Class="FeralInheritance.FeralAbilityDef">
+    <defName>FI_BoomratFireBurst</defName>
+    <label>boomrat fire burst</label>
+    <description>Release a small burst of volatile chemicals, causing a flame explosion around the caster (1.9 cells) like a dying boomrat. The caster is unharmed, but nearby allies are hit.</description>
+    <cooldownTicksRange>720000~720000</cooldownTicksRange>
+    <verbProperties>
+      <range>1.9</range>
+    </verbProperties>
+    <comps>
+      <li Class="FeralInheritance.CompProperties_AbilityFireBurst">
+        <radius>1.9</radius>
+        <damAmount>-1</damAmount>
+      </li>
+    </comps>
+  </AbilityDef>
+</Defs>

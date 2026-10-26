@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LanguageData>
+  <FI_LearnedAbility>{PAWN_labelShort} killed {SOURCE_label} and learned the ability "{ABILITY}". (Tier {TIER})</FI_LearnedAbility>
+  <FI_TierUp>{PAWN_labelShort}'s ability "{ABILITY}" reached tier {TIER}. Its cooldown is now shorter.</FI_TierUp>
+  <FI_GizmoLabel>{ABILITY} (T{TIER})</FI_GizmoLabel>
+  <FI_TierInfo>Tier {TIER} · {SOURCE} kills: {KILLS}</FI_TierInfo>
+  <FI_TierNext>{REMAIN} more kills to the next tier</FI_TierNext>
+  <FI_TierMax>Max tier (tier 3)</FI_TierMax>
+  <FI_TierLocked>This ability is locked at tier 1.</FI_TierLocked>
+  <FI_Settings_Header>Per-ability tier thresholds (cumulative kills of the same species)</FI_Settings_Header>
+  <FI_Settings_T1>Kills needed to learn (tier 1)</FI_Settings_T1>
+  <FI_Settings_T2>Total kills needed for tier 2</FI_Settings_T2>
+  <FI_Settings_T3>Total kills needed for tier 3</FI_Settings_T3>
+  <FI_Settings_Invalid>Warning: values must be tier 1 ≤ tier 2 ≤ tier 3. They are corrected automatically when you close this window.</FI_Settings_Invalid>
+  <FI_Settings_Note>Min 1, max 999, tier 1 ≤ tier 2 ≤ tier 3. Changes apply immediately to running games (tiers recalculated from kill counts). Abilities from other enabled DLCs appear here automatically.</FI_Settings_Note>
+  <FI_Settings_ResetAll>Reset all to defaults</FI_Settings_ResetAll>
+  <FI_Settings_ResetOne>Reset this ability</FI_Settings_ResetOne>
+  <FI_Settings_AbilityHeader>[{ABILITY}] (kill {SOURCE}) · defaults {D1} / {D2} / {D3}</FI_Settings_AbilityHeader>
+  <FI_Settings_TraitCommonality>Feral Inheritance trait commonality: {VALUE}</FI_Settings_TraitCommonality>
+  <FI_Settings_TraitCommonalityTip>0 = never appears naturally, default 0.3, max 5. Weighed against other traits' commonality. Does not affect pawns already generated.</FI_Settings_TraitCommonalityTip>
+  <FI_Settings_TraitCommonalityReset>Reset commonality (0.3)</FI_Settings_TraitCommonalityReset>
+  <FI_Stat_CurrentTier>Current tier</FI_Stat_CurrentTier>
+  <FI_Stat_TierValue>Tier {TIER} ({KILLS} kills, {PAWN})</FI_Stat_TierValue>
+  <FI_Stat_CurrentTierDesc>Current tier of the selected pawn. The cooldown above also uses this tier.</FI_Stat_CurrentTierDesc>
+  <FI_Stat_TierRow>Tier {TIER}</FI_Stat_TierRow>
+  <FI_Stat_TierRowValue>Cooldown {COOLDOWN} · {KILLS} total kills</FI_Stat_TierRowValue>
+  <FI_Stat_TierRowDesc>Cooldown per tier and required cumulative kills of the same species (reflects mod settings).</FI_Stat_TierRowDesc>
+  <FI_Settings_RaiderChance>Chance a raider carries the Feral Inheritance gene: {VALUE}</FI_Settings_RaiderChance>
+  <FI_Settings_RaiderChanceTip>Requires Biotech. Each hostile raider has this chance to arrive with the gene and one learnable ability (fixed at tier 1). Default 2%, max 20%, 0 disables.</FI_Settings_RaiderChanceTip>
+  <FI_Settings_RaiderChanceReset>Reset raider chance (2%)</FI_Settings_RaiderChanceReset>
+</LanguageData>

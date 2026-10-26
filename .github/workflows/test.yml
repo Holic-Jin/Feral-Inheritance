@@ -1,0 +1,87 @@
+# Test workflow: read-only token, no secrets. Never use pull_request_target here.
+# Required checks for branch protection (exact check-run names): "test (1.6)" and "test (1.7)".
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # Lets the owner (or a later, separately approved model-call step) run the checks on a
+  # model/* branch: PRs opened with GITHUB_TOKEN do not trigger pull_request runs.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # Keep this name stable: branch protection matches the check-run names
+    # "test (1.6)" and "test (1.7)".
+    name: test (${{ matrix.rimworld }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        rimworld: ["1.6", "1.7"]
+        include:
+          # RimWorld 1.6: net472, Krafs.Rimworld.Ref 1.6.4871, Lib.Harmony 2.4.2 (stable)
+          - rimworld: "1.6"
+            tfm: net472
+          # RimWorld 1.7: net10.0, Krafs.Rimworld.Ref 1.7.4985-unstable and
+          # Lib.Harmony 3.0.0-rc.3 -- both PRE-RELEASES. Harmony 3.0.0-rc.3 is a release
+          # candidate built from a work branch (fix/issue-783-method-generation), used as a
+          # compile-time reference only; the runtime Harmony comes from the Harmony mod.
+          - rimworld: "1.7"
+            tfm: net10.0
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+      DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1"
+    steps:
+      - name: Checkout (plain git, no third-party action)
+        # actions/checkout is not used: csharp-tools-review.md has no reputation review or
+        # verdict for it (it is only named in the "recommended CI" summary). Swap-in once
+        # reviewed: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        # Public repo: anonymous fetch, no credentials are written to .git/config.
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git -c protocol.version=2 fetch -q --no-tags --depth=1 origin "+${GITHUB_SHA}:refs/remotes/ci/head"
+          git checkout -q --detach refs/remotes/ci/head
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          git log -1 --format='checked out %H'
+
+      - name: Set up .NET SDK (exact version from global.json)
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+          # no caching of NuGet packages or build output (reference assemblies must not be
+          # redistributed through a public Actions cache)
+          cache: false
+
+      - name: Restore (locked mode, nuget.org only, trusted signers)
+        run: |
+          set -euo pipefail
+          echo "NUGET_PACKAGES=${RUNNER_TEMP}/nuget-packages" >> "$GITHUB_ENV"
+          NUGET_PACKAGES="${RUNNER_TEMP}/nuget-packages" \
+            dotnet restore Source/FeralInheritance.csproj --locked-mode --configfile nuget.config
+
+      - name: Build RimWorld ${{ matrix.rimworld }} (${{ matrix.tfm }})
+        run: dotnet build Source/FeralInheritance.csproj -c Release -f "${{ matrix.tfm }}" --no-restore
+
+      - name: Output contains only our assembly (no reference assemblies)
+        run: |
+          set -euo pipefail
+          out="${{ matrix.rimworld }}/Assemblies"
+          ls -la "$out"
+          extra="$(find "$out" -type f ! -name FeralInheritance.dll ! -name .gitkeep)"
+          if [ -n "$extra" ]; then echo "::error::unexpected files in $out:"; echo "$extra"; exit 1; fi
+          test -f "$out/FeralInheritance.dll"
+
+      - name: XML well-formedness (python stdlib, no DTD/entities)
+        run: python3 tools/check_xml.py
+
+      - name: Gateway unit tests (python stdlib unittest, no network)
+        run: python3 -m unittest discover -s tools/tests -v

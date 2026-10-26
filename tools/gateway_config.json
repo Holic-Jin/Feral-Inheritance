@@ -1,0 +1,25 @@
+{
+  "_comment": "Model gateway policy. Hard-coded rules in model_gateway.py (project allowlist, FinisMundi refusal, ALLOWED_PATH_GLOBS, HARD_DENIED_GLOBS, secret filter, branch-per-run) cannot be loosened from here. Optional 'allowed_path_globs' here can only NARROW the hard-coded write allowlist.",
+  "allowed_projects": [
+    "feral-inheritance"
+  ],
+  "github_repo": "Holic-Jin/Feral-Inheritance",
+  "base_branch": "main",
+  "endpoint": "https://integrate.api.nvidia.com/v1/chat/completions",
+  "default_model": "moonshotai/kimi-k2.6",
+  "rate_limit_per_minute": 40,
+  "rate_limit_wait": true,
+  "max_rate_wait_seconds": 90,
+  "request_timeout_seconds": 180,
+  "max_tokens": 4096,
+  "temperature": 0.2,
+  "max_prompt_bytes": 200000,
+  "max_diff_bytes": 200000,
+  "draft_pr": true,
+  "state_dir": ".gateway",
+  "context_extra_globs": [
+    "About/About.xml",
+    "LoadFolders.xml",
+    "Source/FeralInheritance.csproj"
+  ]
+}

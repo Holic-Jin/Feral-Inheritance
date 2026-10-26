@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LanguageData>
+  <FI_ToxalopeToxCloud.label>독성사슴 독 가스</FI_ToxalopeToxCloud.label>
+  <FI_ToxalopeToxCloud.description>몸에서 독성 물질을 뿜어, 죽어가는 독성사슴처럼 자기 주변(반경 5.9칸)에 큰 독 가스 구름을 만듭니다. 가스는 오래 남아 퍼집니다. 시전자는 보호받지 않으므로 방독면이나 독 저항이 없으면 시전자와 주변 아군도 가스를 들이마십니다.</FI_ToxalopeToxCloud.description>
+</LanguageData>

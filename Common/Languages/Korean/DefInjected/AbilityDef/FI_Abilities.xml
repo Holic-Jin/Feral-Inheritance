@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LanguageData>
+  <FI_BoomalopeFireBurst.label>폭탄사슴 화염 폭발</FI_BoomalopeFireBurst.label>
+  <FI_BoomalopeFireBurst.description>몸에서 휘발성 화학물질을 터뜨려, 죽어가는 성체 폭탄사슴처럼 자기 주변(반경 4.9칸)에 큰 화염 폭발을 일으킵니다. 시전자는 피해를 입지 않지만 주변 아군은 휘말립니다.</FI_BoomalopeFireBurst.description>
+  <FI_BoomratFireBurst.label>폭탄쥐 화염 폭발</FI_BoomratFireBurst.label>
+  <FI_BoomratFireBurst.description>몸에서 휘발성 화학물질을 조금 터뜨려, 죽어가는 폭탄쥐처럼 자기 주변(반경 1.9칸)에 작은 화염 폭발을 일으킵니다. 시전자는 피해를 입지 않지만 주변 아군은 휘말립니다.</FI_BoomratFireBurst.description>
+</LanguageData>

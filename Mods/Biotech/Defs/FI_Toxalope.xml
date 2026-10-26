@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Defs>
+  <!-- 독성사슴(Toxalope, Biotech): 사망 시 독 가스(DeathActionWorker_ToxCloud) → 시전자 중심 독 가스 구름 (0.9.1~).
+       시전자 보호 없음 — 시전자도 가스에 노출됨(방독면 등으로 대응).
+       가스 반경 5.9 ≈ 109칸 (0.9.0: 3.9 ≈ 45칸, 약 2.4배). 바닐라 비교: 독 가스 팩 cellsToFill 45, IED 독 가스 함정 약 8.9칸 -->
+  <AbilityDef ParentName="FI_SelfBlastBase" Class="FeralInheritance.FeralAbilityDef">
+    <defName>FI_ToxalopeToxCloud</defName>
+    <label>toxalope tox cloud</label>
+    <description>Release toxic material from the body, creating a large cloud of tox gas around the caster (radius 5.9) like a dying toxalope. The gas lingers and spreads. The caster is not protected: without a gas mask or tox resistance, the caster breathes it too, as do nearby allies.</description>
+    <cooldownTicksRange>780000~780000</cooldownTicksRange>
+    <verbProperties>
+      <range>5.9</range>
+    </verbProperties>
+    <comps>
+      <li Class="FeralInheritance.CompProperties_AbilityToxCloud">
+        <radius>5.9</radius>
+      </li>
+    </comps>
+  </AbilityDef>
+
+  <FeralInheritance.FeralSourceDef>
+    <defName>FI_Source_Toxalope</defName>
+    <race>Toxalope</race>
+    <ability>FI_ToxalopeToxCloud</ability>
+    <killsForT1>1</killsForT1>
+    <killsForT2>3</killsForT2>
+    <killsForT3>8</killsForT3>
+    <lockAtT1>false</lockAtT1>
+    <cooldownTicksT1>780000</cooldownTicksT1>   <!-- 13일 -->
+    <cooldownTicksT2>180000</cooldownTicksT2>   <!-- 3일 -->
+    <cooldownTicksT3>37500</cooldownTicksT3>    <!-- 15시간 -->
+  </FeralInheritance.FeralSourceDef>
+</Defs>

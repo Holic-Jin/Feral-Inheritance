@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ModMetaData>
+  <packageId>holic.feralinheritance</packageId>
+  <name>Feral Inheritance</name>
+  <author>Holic Jin</author>
+  <modVersion>0.9.1</modVersion>
+  <supportedVersions>
+    <li>1.6</li>
+    <li>1.7</li>
+  </supportedVersions>
+  <modDependencies>
+    <li>
+      <packageId>brrainz.harmony</packageId>
+      <displayName>Harmony</displayName>
+      <steamWorkshopUrl>steam://url/CommunityFilePage/2009463077</steamWorkshopUrl>
+      <downloadUrl>https://github.com/pardeike/HarmonyRimWorld/releases/latest</downloadUrl>
+    </li>
+  </modDependencies>
+  <loadAfter>
+    <li>brrainz.harmony</li>
+    <li>Ludeon.RimWorld.Biotech</li>
+  </loadAfter>
+  <description>「야수의 계승」 특성을 가진 정착민이 특수 능력이 있는 동물을 직접 처치하면 그 능력을 배웁니다. 같은 종을 더 잡을수록 능력이 3단계까지 성장합니다(재사용 대기시간 단축).
+
+배울 수 있는 능력
+- 폭탄사슴 → 「폭탄사슴 화염 폭발」: 시전자 중심 반경 4.9칸 화염 폭발
+- 폭탄쥐 → 「폭탄쥐 화염 폭발」: 시전자 중심 반경 1.9칸 화염 폭발
+- (Biotech) 독성사슴 → 「독성사슴 독 가스」: 시전자 중심 반경 5.9칸 독 가스 구름 (시전자도 영향 — 방독면 필요)
+
+규칙
+- 처치 1회에 습득, 누적 3회에 2단계, 누적 8회에 3단계 (모드 설정에서 능력별로 바꿀 수 있음)
+- 모든 능력의 시전 시간은 0.5초입니다.
+- 시전자는 자기 폭발에 피해를 입지 않지만, 주변 아군과 폭발로 번진 불은 평소대로 위험합니다.
+- 사람·메카노이드, 그리고 좀비화된 동물(Anomaly 변이체)에게서는 배우지 않습니다.
+- 모드 설정: 능력별 단계 기준, 「야수의 계승」 특성 등장 확률(0~5, 기본 0.3), 습격자 유전자 확률(0~20%, 기본 2%)
+- Biotech가 있으면 같은 역할의 「야수의 계승」 초월입자 유전자가 추가됩니다(이식에 초월입자 캡슐 1개). 습격자가 낮은 확률(기본 2%)로 이 유전자와 능력 1개(1단계 고정)를 갖고 와서 전투 중에 사용합니다.
+
+필요: RimWorld + Harmony (DLC 없이 작동)
+Anomaly / Odyssey: 매우 권장 — 이후 업데이트에서 이 DLC들의 생물 능력이 추가될 예정입니다. 지금은 Core와 Biotech 능력만 들어 있습니다.
+
+A colonist with the Feral Inheritance trait who personally kills an animal with a special ability learns that ability, and grows it up to tier 3 by killing more of the same species (shorter cooldowns).
+
+Learnable abilities
+- Boomalope: Boomalope Fire Burst — flame explosion centered on the caster (radius 4.9)
+- Boomrat: Boomrat Fire Burst — flame explosion centered on the caster (radius 1.9)
+- (Biotech) Toxalope: Toxalope Tox Cloud — tox gas cloud centered on the caster (radius 5.9; the caster is affected too, bring a gas mask)
+
+Rules
+- Learn on 1 kill, tier 2 at 3 total kills, tier 3 at 8 (configurable per ability in mod settings).
+- Every ability has a 0.5 second activation time.
+- The caster takes no damage from their own blast, but nearby allies and fires spread by the blast are dangerous as usual.
+- Nothing is learned from humans, mechanoids, or zombified animals (Anomaly mutants).
+- Mod settings: per-ability tier thresholds, Feral Inheritance trait commonality (0–5, default 0.3), raider gene chance (0–20%, default 2%).
+- With Biotech, an equivalent archite Feral Inheritance gene is added (needs 1 archite capsule to implant). Raiders have a low chance (default 2%) to arrive with the gene and one ability fixed at tier 1, and use it in combat.
+
+Requires RimWorld + Harmony (no DLC required).
+Anomaly / Odyssey: highly recommended — abilities from their creatures are planned for future updates. This build contains Core and Biotech abilities only.</description>
+</ModMetaData>

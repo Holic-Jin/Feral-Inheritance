@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Defs>
+  <!-- 처치하면 능력을 주는 생물 목록.
+       killsForT1~3 = 단계 기준 기본값(누적 처치 수). 모드 설정에서 능력별로 덮어쓸 수 있음(설정 우선)
+       lockAtT1=true 이면 1단계 고정(판을 뒤집는 능력용)
+       iconTexPath(선택) = 능력 아이콘 텍스처. 비우면 대상 생물의 성체 그래픽을 자동 사용
+       쿨다운 틱: 1일 = 60000, 1시간 = 2500
+       범위 규칙: T1 12~15일(720000~900000) / T2 2.5~3.5일(150000~210000) / T3 12~18시간(30000~45000) -->
+
+  <FeralInheritance.FeralSourceDef>
+    <defName>FI_Source_Boomalope</defName>
+    <race>Boomalope</race>
+    <ability>FI_BoomalopeFireBurst</ability>
+    <killsForT1>1</killsForT1>
+    <killsForT2>3</killsForT2>
+    <killsForT3>8</killsForT3>
+    <lockAtT1>false</lockAtT1>
+    <cooldownTicksT1>780000</cooldownTicksT1>   <!-- 13일 -->
+    <cooldownTicksT2>180000</cooldownTicksT2>   <!-- 3일 -->
+    <cooldownTicksT3>37500</cooldownTicksT3>    <!-- 15시간 -->
+  </FeralInheritance.FeralSourceDef>
+
+  <FeralInheritance.FeralSourceDef>
+    <defName>FI_Source_Boomrat</defName>
+    <race>Boomrat</race>
+    <ability>FI_BoomratFireBurst</ability>
+    <killsForT1>1</killsForT1>
+    <killsForT2>3</killsForT2>
+    <killsForT3>8</killsForT3>
+    <lockAtT1>false</lockAtT1>
+    <cooldownTicksT1>720000</cooldownTicksT1>   <!-- 12일 -->
+    <cooldownTicksT2>150000</cooldownTicksT2>   <!-- 2.5일 -->
+    <cooldownTicksT3>30000</cooldownTicksT3>    <!-- 12시간 -->
+  </FeralInheritance.FeralSourceDef>
+</Defs>
