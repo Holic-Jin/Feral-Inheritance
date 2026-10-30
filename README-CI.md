@@ -15,9 +15,11 @@ commands and never sees secrets. Nothing merges automatically; the owner merges.
         `tools/gateway_config.json` can only narrow it).
       - Anything mentioning **FinisMundi** is refused in the project, task, task_id, model, file paths,
         repo path and target repo name (`github_repo` and `GITHUB_REPOSITORY`), even if allowlisted.
-        The check applies NFKC normalization, strips zero-width and other format characters, lowercases,
-        treats `1` as `i` and `0` as `o`, and allows separators between letters (`Fin1s`, `f-i-n-i-s`,
-        `finis-mundi`, fullwidth `ＦｉｎｉｓＭｕｎｄｉ`). `finish` is not a match.
+        The check applies NFKD, strips combining marks and format characters, lowercases, and maps
+        confusables (Cyrillic and Greek lookalikes, `5`→`s`, `!` and `|`→`i`, `$`→`s`, plus `1`→`i` and
+        `0`→`o`). It matches standalone `finis` and `finismundi` on word boundaries, with separators
+        allowed between letters (`Fin1s`, `f-i-n-i-s`, `finis-mundi`, fullwidth `ＦｉｎｉｓＭｕｎｄｉ`).
+        `finish`, `Definis`, `infinis` and the phrase `fin is` are not matches.
       - `task_id` must match `^[a-z0-9][a-z0-9_-]{0,47}$`.
       - The task text and every context file are scanned for secrets (AWS keys, GitHub
         `ghp_/gho_/github_pat_` tokens, `nvapi-` keys, `sk-` keys, private-key blocks, Slack, Google API keys,
@@ -36,14 +38,18 @@ commands and never sees secrets. Nothing merges automatically; the owner merges.
       setting. The state file only lives as long as one job, which is why a second run must wait.
    5. It calls `https://integrate.api.nvidia.com/v1/chat/completions`. The default model is
       `moonshotai/kimi-k2.6`. A caller-supplied model id must match `^[A-Za-z0-9._/-]{1,100}$`,
-      must not contain a newline or other control character, and is passed through the secret filter.
+      every `/` segment must start with an alphanumeric and must not be `.` or `..`, it must not
+      contain a newline or other control character, and it is passed through the secret filter.
       The key comes from the `nvidia-gateway` environment secret `NVIDIA_API_KEY` only and is never
       printed or logged. urllib is configured with no proxy and a redirect handler that refuses every
       3xx, so the `Authorization` header is not sent to another host.
    6. The model is asked for a unified diff only. The gateway extracts it and validates it: allowed paths,
       deny list, traversal, symlinks, binaries, mode changes, renames, copies, deletes, and secrets in the
       added lines. Hunk bodies are parsed by the `@@` line counts, so a removed line that starts with
-      `-- ` is content, not a file header. It then cross-checks with `git apply --numstat --summary --check`.
+      `-- ` is content, not a file header. Patches are split on LF only (one trailing CR is CRLF);
+      any other line separator is rejected, and a line after a hunk must be a header or blank.
+      An empty hunk line with no leading space is context, which is what `git apply` accepts.
+      It then cross-checks with `git apply --numstat --summary --check`.
       **If any file in the diff is denied, the whole diff is rejected.**
    7. It runs `git apply`, re-checks `git status`, commits as `feral-model-gateway`, pushes the branch with
       `GITHUB_TOKEN` (as a per-command header, never stored in `.git/config`) and opens a **draft PR** through

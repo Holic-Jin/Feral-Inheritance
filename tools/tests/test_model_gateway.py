@@ -5,9 +5,11 @@ a secret-looking literal (keeps GitHub push protection / secret scanning quiet).
 """
 import contextlib
 import io
+import ipaddress
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -99,6 +101,21 @@ def model_reply(content, usage=None):
                      "usage": usage or {"prompt_tokens": 111, "completion_tokens": 22, "total_tokens": 133}})
 
 
+def _is_loopback(address):
+    host = address[0] if isinstance(address, tuple) and address else address
+    if isinstance(host, bytes):
+        try:
+            host = host.decode("ascii")
+        except UnicodeError:
+            return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except (ValueError, TypeError):
+        return False
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -107,12 +124,31 @@ class Base(unittest.TestCase):
         env = {k: v for k, v in os.environ.items() if k not in ("NVIDIA_API_KEY", "GITHUB_TOKEN", "GITHUB_REPOSITORY", "GH_TOKEN")}
         self.env = mock.patch.dict(os.environ, env, clear=True)
         self.env.start()
-        # any accidental real network call fails the test
+        # urlopen is not the only network path: the gateway uses build_opener().open.
         self.net = mock.patch("urllib.request.urlopen", side_effect=AssertionError("real network call"))
         self.net.start()
+        real_create = socket.create_connection
+        real_connect = socket.socket.connect
+
+        def guarded_create(address, *args, **kwargs):
+            if not _is_loopback(address):
+                raise AssertionError("non-loopback create_connection %r" % (address,))
+            return real_create(address, *args, **kwargs)
+
+        def guarded_connect(sock, address):
+            if not _is_loopback(address):
+                raise AssertionError("non-loopback connect %r" % (address,))
+            return real_connect(sock, address)
+
+        self.create_guard = mock.patch("socket.create_connection", guarded_create)
+        self.connect_guard = mock.patch.object(socket.socket, "connect", guarded_connect)
+        self.create_guard.start()
+        self.connect_guard.start()
         self.clock = Clock(1793000000.0)
 
     def tearDown(self):
+        self.connect_guard.stop()
+        self.create_guard.stop()
         self.net.stop()
         self.env.stop()
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -816,6 +852,112 @@ class TestQaFixes(Base):
             " kept-too\n"
         )
         self.assertEqual(gw.validate_diff(diff, self.cfg, self.repo), ["Source/Foo.cs"])
+
+    def test_line_separators_cannot_hide_a_path(self):
+        evil = (
+            "diff --git a/Source/Foo.cs b/Source/Foo.cs\n"
+            "--- a/Source/Foo.cs\n"
+            "+++ b/Source/Foo.cs\n"
+            "@@ -1 +1 @@\n"
+            "-a\n"
+            "+x\r@@ -1,3 +1,1 @@\n"
+            "diff --git a/.github/workflows/evil.yml b/.github/workflows/evil.yml\n"
+            "--- a/.github/workflows/evil.yml\n"
+            "+++ b/.github/workflows/evil.yml\n"
+        )
+        with self.assertRaises(gw.DiffRejected) as cm:
+            gw.validate_diff(evil, self.cfg, self.repo)
+        self.assertEqual(cm.exception.outcome, "rejected_line_sep")
+        for sep in ("\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            with self.subTest(sep=repr(sep)):
+                smuggled = (
+                    "diff --git a/Source/Foo.cs b/Source/Foo.cs\n"
+                    "--- a/Source/Foo.cs\n"
+                    "+++ b/Source/Foo.cs\n"
+                    "@@ -1 +1 @@\n"
+                    "-a\n"
+                    "+x" + sep + "@@ -1 +1 @@\n"
+                    "diff --git a/.github/workflows/evil.yml b/.github/workflows/evil.yml\n"
+                    "--- a/.github/workflows/evil.yml\n"
+                    "+++ b/.github/workflows/evil.yml\n"
+                )
+                with self.assertRaises(gw.DiffRejected) as cm:
+                    gw.validate_diff(smuggled, self.cfg, self.repo)
+                self.assertEqual(cm.exception.outcome, "rejected_line_sep")
+        crlf = GOOD_DIFF.replace("\n", "\r\n")
+        self.assertEqual(gw.validate_diff(crlf, self.cfg, self.repo), ["Source/Foo.cs"])
+        with self.assertRaises(gw.DiffRejected) as cm:
+            gw.validate_diff(GOOD_DIFF + "not-a-header\n", self.cfg, self.repo)
+        self.assertEqual(cm.exception.outcome, "rejected_hunk")
+        secret = "SERVICE_KEY=" + "f8Kq2LmZ9xP4vR7tB1nW6yH3"
+        for sep in ("\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            with self.subTest(secret_sep=repr(sep)):
+                self.assertTrue(gw.find_secrets("prefix" + sep + secret))
+
+    def test_empty_hunk_line_is_context(self):
+        diff = (
+            "diff --git a/Source/Foo.cs b/Source/Foo.cs\n"
+            "--- a/Source/Foo.cs\n"
+            "+++ b/Source/Foo.cs\n"
+            "@@ -1,3 +1,3 @@\n"
+            " kept\n"
+            "\n"
+            " kept2\n"
+        )
+        self.assertEqual(gw.validate_diff(diff, self.cfg, self.repo), ["Source/Foo.cs"])
+
+    def test_finismundi_confusables_and_word_boundaries(self):
+        bypasses = (
+            "F\u0456n\u0456s",          # Cyrillic і
+            "F\u03b9n\u03b9s",          # Greek iota
+            "f\u03b9n\u03b9\u03c3",     # Greek iota and sigma
+            "fi\u0301nis",             # combining acute
+            "f\u00ednis",              # precomposed i-acute, NFKD
+            "fini5",
+            "f!n!s",
+            "f|n|s",
+            "fini$",
+        )
+        for value in bypasses:
+            with self.subTest(value=value):
+                self.assertTrue(gw.mentions_finismundi(value), repr(value))
+        for benign in ("Definis", "infinis", "the fin is sharp", "finish", "finish the ability"):
+            with self.subTest(benign=benign):
+                self.assertFalse(gw.mentions_finismundi(benign), benign)
+
+    def test_model_segments_and_fullmatch(self):
+        gw.check_model("moonshotai/kimi-k2.6")
+        for bad in ("..", "../../x", "-rf", "a/..", "org/-rf", "a//b", "moonshotai/kimi-k2.6\n"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(gw.PolicyError) as cm:
+                    gw.check_model(bad)
+                self.assertEqual(cm.exception.outcome, "refused_model")
+        with self.assertRaises(gw.PolicyError):
+            gw.check_task_id("t1\n")
+        gw.check_task_id("t1")
+        self.assertIsNone(gw.TASK_ID_RE.fullmatch("t1\n"))
+        self.assertIsNone(gw.SAFE_PATH_RE.fullmatch("Source/Foo.cs\n"))
+
+    def test_ledger_failure_stays_nonzero_without_secrets(self):
+        secret = "ledger-" + FAKE_NV_KEY
+        with mock.patch.object(gw, "append_ledger", side_effect=RuntimeError(secret)):
+            rc, out, err = self.run_gw(self.args("--task", "x", "--dry-run"))
+        self.assertNotEqual(rc, 0)
+        self.assertNotIn(secret, out + err)
+        self.assertNotIn("Traceback", err)
+        self.assertIn("internal error", err)
+
+    def test_socket_guard_blocks_non_loopback(self):
+        with self.assertRaises(AssertionError) as cm:
+            socket.create_connection(("93.184.216.34", 9), timeout=0.2)
+        self.assertIn("non-loopback", str(cm.exception))
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            with self.assertRaises(AssertionError) as cm:
+                sock.connect(("8.8.8.8", 53))
+            self.assertIn("non-loopback", str(cm.exception))
+        finally:
+            sock.close()
 
     def test_model_id_rules(self):
         gw.check_model("moonshotai/kimi-k2.6")

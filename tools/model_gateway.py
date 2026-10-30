@@ -51,13 +51,18 @@ EXIT_OK, EXIT_INTERNAL, EXIT_POLICY, EXIT_API, EXIT_DIFF, EXIT_GIT, EXIT_USAGE =
 # --------------------------------------------------------------------------
 # Hard-coded policy
 # --------------------------------------------------------------------------
-# finis + mundi after NFKC, format-character stripping and leet folding.
-# Separators may sit between letters. "finis" alone matches (Fin1s, f-i-n-i-s);
-# "finish" does not.
-_FINIS_WORD = r"[\W_]*".join("finis")
-_MUNDI_WORD = r"[\W_]*".join("mundi")
+# Standalone "finis" or "finismundi" after NFKD, dropping combining marks, and
+# mapping confusable letters. Separators may sit between letters, but whitespace
+# may sit only between the two words, so "fin is" is not a match. Word boundaries
+# keep Definis and infinis from matching. "finish" does not match.
+_FINIS_LETTER_SEP = r"[._/\-]*"
+_FINIS_WORD = _FINIS_LETTER_SEP.join("finis")
+_MUNDI_WORD = _FINIS_LETTER_SEP.join("mundi")
 FORBIDDEN_PROJECT_RE = re.compile(
-    _FINIS_WORD + r"(?:" + _MUNDI_WORD + r"|[\W_]+" + _MUNDI_WORD + r"|(?![\w]))")
+    r"(?<![a-z0-9])(?:" + _FINIS_WORD + r"[._/\-\s]*" + _MUNDI_WORD + r"|" + _FINIS_WORD + r")(?![a-z0-9])")
+
+# Line separators other than LF. A single CR immediately before LF is CRLF and is allowed.
+_BAD_LINE_SEPS = ("\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
 
 # Projects that may ever be sent to the model API. Config can only narrow this.
 ALLOWED_PROJECTS = ("feral-inheritance",)
@@ -202,11 +207,47 @@ def load_config(path=DEFAULT_CONFIG):
     return cfg
 
 
+# Homoglyphs and leet swaps applied after NFKD, Mn/Cf stripping, and lowercasing.
+_FINIS_CONFUSABLES = str.maketrans({
+    "1": "i", "!": "i", "|": "i",
+    "0": "o",
+    "5": "s", "$": "s",
+    # Cyrillic lookalikes
+    "\u0456": "i",  # і
+    "\u0457": "i",  # ї
+    "\u04cf": "i",  # ӏ palochka
+    "\u0455": "s",  # ѕ dze
+    "\u043e": "o",  # о
+    "\u0430": "a",  # а
+    "\u0435": "e",  # е
+    "\u0440": "p",  # р
+    "\u0441": "c",  # с
+    "\u0445": "x",  # х
+    "\u0443": "y",  # у
+    "\u0458": "j",  # ј
+    "\u043c": "m",  # м
+    # Greek lookalikes
+    "\u03b9": "i",  # ι
+    "\u03ba": "k",  # κ
+    "\u03bf": "o",  # ο
+    "\u03b1": "a",  # α
+    "\u03b5": "e",  # ε
+    "\u03c3": "s",  # σ
+    "\u03c2": "s",  # ς
+    "\u03c5": "u",  # υ
+    "\u03bd": "v",  # ν
+})
+
+
 def _fold_for_finismundi(value):
-    """NFKC, drop format/zero-width characters, lowercase, then 1→i and 0→o."""
-    text = unicodedata.normalize("NFKC", str(value))
-    text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
-    return text.lower().translate(str.maketrans({"1": "i", "0": "o"}))
+    """NFKD, drop combining marks and format characters, lowercase, then confusables.
+
+    Confusables include Cyrillic and Greek lookalikes, 5→s, ! and |→i, $→s,
+    and the existing 1→i and 0→o swaps.
+    """
+    text = unicodedata.normalize("NFKD", str(value))
+    text = "".join(ch for ch in text if unicodedata.category(ch) not in ("Mn", "Cf"))
+    return text.lower().translate(_FINIS_CONFUSABLES)
 
 
 def mentions_finismundi(*values):
@@ -229,6 +270,9 @@ def check_model(model):
         raise PolicyError("refused: model id contains a newline or control character", "refused_model")
     if MODEL_RE.fullmatch(model) is None:
         raise PolicyError("refused: model id must match %s" % MODEL_RE.pattern, "refused_model")
+    for segment in model.split("/"):
+        if not segment or segment in (".", "..") or not segment[0].isalnum():
+            raise PolicyError("refused: invalid model id", "refused_model")
     if mentions_finismundi(model):
         raise PolicyError("refused: FinisMundi", "refused_finismundi")
     assert_no_secrets("model", model)
@@ -261,8 +305,29 @@ def _entropy(s):
     return -sum(c / n * math.log2(c / n) for c in counts.values())
 
 
+def _lines_for_secret_scan(text):
+    """LF-only lines with one trailing CR removed. Other line separators become LF.
+
+    str.splitlines() would hide a secret that sits after ``\\r`` or ``U+2028`` from
+    patterns anchored with ``(?m)^``, and from the diff added-line scan.
+    """
+    if not text:
+        return ""
+    for sep in _BAD_LINE_SEPS:
+        text = text.replace(sep, "\n")
+    lines = []
+    for line in text.split("\n"):
+        if line.endswith("\r"):
+            line = line[:-1]
+        if "\r" in line:
+            line = line.replace("\r", "\n")
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def find_secrets(text, extra_literals=()):
     """Return a list of pattern names found (never the matched values)."""
+    text = _lines_for_secret_scan(text)
     hits = []
     for name, rx in SECRET_PATTERNS:
         if rx.search(text):
@@ -313,7 +378,7 @@ def glob_to_regex(glob, ignore_case=False):
 
 
 def _match_any(path, globs, ignore_case):
-    return any(glob_to_regex(g, ignore_case).match(path) for g in globs)
+    return any(glob_to_regex(g, ignore_case).fullmatch(path) for g in globs)
 
 
 def check_path_syntax(path):
@@ -325,7 +390,7 @@ def check_path_syntax(path):
 
 
 def check_path_charset(path):
-    if not SAFE_PATH_RE.match(path):
+    if SAFE_PATH_RE.fullmatch(path) is None:
         raise DiffRejected("rejected path %r: only [A-Za-z0-9._-/] path characters are allowed" % path, "rejected_path")
 
 
@@ -412,6 +477,44 @@ def _strip_prefix(p):
 
 
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+_DIFF_GIT_RE = re.compile(r"^diff --git (a/\S+) (b/\S+)$")
+
+
+def _split_diff_lines(diff):
+    """Split a patch on LF only. One trailing CR per line (CRLF) is removed.
+
+    Any other line separator, including a bare or mid-line CR, is rejected.
+    ``str.splitlines()`` would treat those as breaks and desynchronise the
+    hunk counts from what ``git apply`` sees.
+    """
+    for sep in _BAD_LINE_SEPS:
+        if sep in diff:
+            raise DiffRejected("diff contains a disallowed line separator", "rejected_line_sep")
+    lines = []
+    for line in diff.split("\n"):
+        if "\r" in line[:-1]:
+            raise DiffRejected("diff contains a disallowed line separator", "rejected_line_sep")
+        if line.endswith("\r"):
+            line = line[:-1]
+        lines.append(line)
+    # split("\n") keeps a phantom empty item for the terminating LF. A real blank
+    # line is a remaining empty item (the patch ended with a blank line).
+    if diff.endswith("\n") and lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+def _is_patch_header(line):
+    return (
+        line.startswith("diff --git ")
+        or line.startswith("--- ")
+        or line.startswith("+++ ")
+        or line.startswith("@@")
+        or line.startswith(("old mode ", "new mode ", "deleted file mode ", "new file mode ",
+                            "rename from ", "rename to ", "copy from ", "copy to ",
+                            "similarity index ", "dissimilarity index ", "index ",
+                            "GIT binary patch", "Binary files ", "\\"))
+    )
 
 
 def validate_diff(diff, cfg, repo_root=None):
@@ -428,10 +531,17 @@ def validate_diff(diff, cfg, repo_root=None):
     paths = set()
     added = []
     saw_hunk = False
-    lines = diff.splitlines()
+    lines = _split_diff_lines(diff)
     i = 0
     while i < len(lines):
         line = lines[i]
+        if saw_hunk:
+            if line == "":
+                if any(rest != "" for rest in lines[i + 1:]):
+                    raise DiffRejected("unexpected empty line after hunk", "rejected_hunk")
+                break
+            if not _is_patch_header(line):
+                raise DiffRejected("unexpected line after hunk", "rejected_hunk")
         hunk = _HUNK_RE.match(line)
         if hunk:
             saw_hunk = True
@@ -445,7 +555,13 @@ def validate_diff(diff, cfg, repo_root=None):
                 i += 1
                 if body.startswith("\\"):
                     continue
-                if body.startswith("+"):
+                if body == "" or body.startswith(" "):
+                    # git apply treats a completely empty line as context.
+                    if old_left <= 0 or new_left <= 0:
+                        raise DiffRejected("hunk line counts do not match", "rejected_hunk")
+                    old_left -= 1
+                    new_left -= 1
+                elif body.startswith("+"):
                     if new_left <= 0:
                         raise DiffRejected("hunk line counts do not match", "rejected_hunk")
                     new_left -= 1
@@ -454,11 +570,6 @@ def validate_diff(diff, cfg, repo_root=None):
                     if old_left <= 0:
                         raise DiffRejected("hunk line counts do not match", "rejected_hunk")
                     old_left -= 1
-                elif body.startswith(" "):
-                    if old_left <= 0 or new_left <= 0:
-                        raise DiffRejected("hunk line counts do not match", "rejected_hunk")
-                    old_left -= 1
-                    new_left -= 1
                 else:
                     raise DiffRejected("malformed hunk line", "rejected_hunk")
             continue
@@ -477,7 +588,7 @@ def validate_diff(diff, cfg, repo_root=None):
         if line.startswith("index ") and re.search(r"\s(?!100644)\d{6}$", line):
             raise DiffRejected("unexpected file mode in index line", "rejected_mode")
         if line.startswith("diff --git "):
-            m = re.match(r"^diff --git (a/\S+) (b/\S+)$", line)
+            m = _DIFF_GIT_RE.fullmatch(line)
             if not m:
                 raise DiffRejected("unparseable diff --git header", "rejected_path")
             a, b = _strip_prefix(m.group(1)), _strip_prefix(m.group(2))
@@ -752,7 +863,7 @@ def git_check_numstat(repo_root, diff_path, cfg):
 
 
 def check_task_id(task_id):
-    if not task_id or not TASK_ID_RE.match(task_id) or mentions_finismundi(task_id):
+    if not task_id or TASK_ID_RE.fullmatch(task_id) is None or mentions_finismundi(task_id):
         if task_id and mentions_finismundi(task_id):
             raise PolicyError("refused: FinisMundi", "refused_finismundi")
         raise PolicyError("refused: task_id must match %s" % TASK_ID_RE.pattern, "refused_task_id")
@@ -876,6 +987,7 @@ def run(args, cfg, opener=None, clock=time.time, sleep=time.sleep, out=sys.stdou
     model = args.model or cfg.get("default_model") or ""
     rec = {"task_id": args.task_id or None, "project": args.project, "model": None,
            "dry_run": bool(args.dry_run), "prompt_sha256": None}
+    outcome_rc = EXIT_INTERNAL
     try:
         check_model(model)
         rec["model"] = model
@@ -919,6 +1031,7 @@ def run(args, cfg, opener=None, clock=time.time, sleep=time.sleep, out=sys.stdou
                 git_check_numstat(repo_root, tmp, cfg)
                 print("[dry-run] diff OK, would touch: %s" % ", ".join(rec["paths"]), file=out)
             rec["outcome"] = "dry_run"
+            outcome_rc = EXIT_OK
             return EXIT_OK
 
         api_key = os.environ.get("NVIDIA_API_KEY", "")
@@ -963,6 +1076,7 @@ def run(args, cfg, opener=None, clock=time.time, sleep=time.sleep, out=sys.stdou
         if args.no_pr:
             rec["outcome"] = "committed_local"
             print("committed on %s (no push / no PR)" % branch, file=out)
+            outcome_rc = EXIT_OK
             return EXIT_OK
         token = os.environ.get("GITHUB_TOKEN", "")
         if not token:
@@ -982,6 +1096,7 @@ def run(args, cfg, opener=None, clock=time.time, sleep=time.sleep, out=sys.stdou
         rec["pr"] = url
         rec["outcome"] = "pr_opened"
         print("PR: %s" % rec["pr"], file=out)
+        outcome_rc = EXIT_OK
         return EXIT_OK
     except GatewayError as e:
         rec["outcome"] = e.outcome
@@ -990,16 +1105,25 @@ def run(args, cfg, opener=None, clock=time.time, sleep=time.sleep, out=sys.stdou
             print("NOTE: branch %s may exist; it is never reused. Delete it with: "
                   "git push origin --delete %s (remote) / git branch -D %s (local), then rerun."
                   % (rec["branch"], rec["branch"], rec["branch"]), file=sys.stderr)
+        outcome_rc = e.exit_code
         return e.exit_code
     except Exception:
         # No traceback: the message can contain the task, a path, or a live key.
         rec["outcome"] = "internal_error"
         print("ERROR: internal error", file=sys.stderr)
+        outcome_rc = EXIT_INTERNAL
         return EXIT_INTERNAL
     finally:
-        if not rec.get("timestamp"):
-            rec["timestamp"] = utc_now_iso(clock)
-        append_ledger(ledger, rec)
+        try:
+            if not rec.get("timestamp"):
+                rec["timestamp"] = utc_now_iso(clock)
+            append_ledger(ledger, rec)
+        except Exception:
+            # The ledger path or the record must not be echoed; either can carry a secret.
+            print("ERROR: internal error", file=sys.stderr)
+            if outcome_rc == EXIT_OK:
+                outcome_rc = EXIT_INTERNAL
+            return outcome_rc
 
 
 def parse_args(argv):
