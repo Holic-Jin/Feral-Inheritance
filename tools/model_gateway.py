@@ -59,8 +59,9 @@ _FINIS_LOOSE_SEP = r"[._/\-\s]*"
 _FINIS_TIGHT = _FINIS_TIGHT_SEP.join("finis")
 _FINIS_LOOSE = _FINIS_LOOSE_SEP.join("finis")
 _MUNDI_LOOSE = _FINIS_LOOSE_SEP.join("mundi")
+# Up to two arbitrary characters may sit between the words (Finis3Mundi, FinisXMundi).
 FORBIDDEN_PROJECT_RE = re.compile(
-    _FINIS_LOOSE + _FINIS_LOOSE_SEP + _MUNDI_LOOSE
+    _FINIS_LOOSE + r".{0,2}" + _MUNDI_LOOSE
     + r"|(?<![a-z0-9])" + _FINIS_TIGHT + r"(?![a-z0-9])")
 
 # Line separators other than LF. A single CR immediately before LF is CRLF and is allowed.
@@ -211,14 +212,16 @@ def load_config(path=DEFAULT_CONFIG):
 
 # Homoglyphs and leet swaps applied after NFKD, Mn/Cf stripping, and lowercasing.
 _FINIS_CONFUSABLES = str.maketrans({
-    "1": "i", "!": "i", "|": "i", "l": "i",
+    "1": "i", "!": "i", "|": "i",
     "\u0131": "i",  # ı dotless i
+    "\u026a": "i",  # ɪ latin small capital i
     "0": "o",
     "5": "s", "$": "s",
-    "3": "e",
+    "\ua731": "s",  # ꜱ latin small capital s
     "\u03dd": "f",  # ϝ greek digamma (lower of Ϝ)
     "\ua730": "f",  # ꜰ latin small capital f
     "\u0192": "f",  # ƒ
+    "\ua799": "f",  # 
     # Cyrillic lookalikes
     "\u0456": "i",  # і
     "\u0457": "i",  # ї
@@ -246,15 +249,29 @@ _FINIS_CONFUSABLES = str.maketrans({
 })
 
 
+_L_AS_I_TRIGGER = re.compile(r"[0-9!|$]")
+
+
 def _fold_for_finismundi(value):
     """NFKD, drop combining marks and format characters, lowercase, then confusables.
 
-    Confusables include Cyrillic and Greek lookalikes, Ϝ/ꜰ/ƒ→f, ı and l→i,
-    5→s, ! and |→i, $→s, 3→e, and the existing 1→i and 0→o swaps.
+    ``l`` becomes ``i`` only inside a token that also contains a digit or a
+    confusable symbol, so plain ``flnis`` / ``finls`` stay plain words while
+    ``F1nls`` and ``Finl5`` still match. ``3`` is not mapped: it is not a
+    lookalike for any letter in finis/mundi.
     """
     text = unicodedata.normalize("NFKD", str(value))
     text = "".join(ch for ch in text if unicodedata.category(ch) not in ("Mn", "Cf"))
-    return text.lower().translate(_FINIS_CONFUSABLES)
+    text = text.lower()
+
+    def _l_to_i(match):
+        chunk = match.group(0)
+        if _L_AS_I_TRIGGER.search(chunk):
+            return chunk.replace("l", "i")
+        return chunk
+
+    text = re.sub(r"[a-z0-9!|$]+", _l_to_i, text)
+    return text.translate(_FINIS_CONFUSABLES)
 
 
 def mentions_finismundi(*values):
@@ -526,29 +543,44 @@ def _is_patch_header(line):
     )
 
 
-def _after_hunk_line(line):
-    """Classify a line that follows a completed hunk.
+_BINARY_LINE_RE = re.compile(r"^Binary files .+ differ$")
 
-    ``index``, ``\\`` and ``Binary`` lines are not silently ignored: only the
-    exact no-newline marker is allowed among them. ``index`` lines are
-    secret-scanned and then parsed normally (a later file may have one).
-    Binary lines and any other ``\\`` line are rejected.
+
+def _note_no_newline(side, counts):
+    """At most one '\\ No newline at end of file' marker per hunk side."""
+    if side in ("old", "both"):
+        counts["old"] += 1
+    if side in ("new", "both"):
+        counts["new"] += 1
+    if counts["old"] > 1 or counts["new"] > 1:
+        raise DiffRejected("more than one no-newline marker on a hunk side", "rejected_hunk")
+
+
+def _classify_header_line(line):
+    """Secret-scan index, backslash and Binary lines. Reject non-text diffs.
+
+    A Binary line is recognised only in git's exact 'Binary files ... differ'
+    form, and is still rejected because only text diffs are allowed.
     """
     if line == _NO_NEWLINE_MARKER:
-        return "allow"
-    suspicious = (line.startswith("index ") or line.startswith("\\")
-                  or line.startswith("GIT binary patch") or line.startswith("Binary files "))
-    if suspicious:
+        return "newline-marker"
+    if line.startswith("GIT binary patch") or line.startswith("Binary files "):
+        hits = find_secrets(line, live_secret_values())
+        if hits:
+            raise SecretDetected(
+                "model diff contains a possible secret (%s)" % ", ".join(hits), "rejected_secret_in_diff")
+        if line.startswith("Binary files ") and _BINARY_LINE_RE.fullmatch(line) is None:
+            raise DiffRejected("unexpected binary line", "rejected_binary")
+        raise DiffRejected("binary patches are not allowed", "rejected_binary")
+    if line.startswith("index ") or line.startswith("\\"):
         hits = find_secrets(line, live_secret_values())
         if hits:
             raise SecretDetected(
                 "model diff contains a possible secret (%s)" % ", ".join(hits), "rejected_secret_in_diff")
         if line.startswith("\\"):
             raise DiffRejected("unexpected line after hunk", "rejected_hunk")
-        return "parse"
-    if _is_patch_header(line):
-        return "parse"
-    return "reject"
+        return "index"
+    return None
 
 
 def validate_diff(diff, cfg, repo_root=None):
@@ -565,24 +597,37 @@ def validate_diff(diff, cfg, repo_root=None):
     paths = set()
     added = []
     saw_hunk = False
+    last_side = None
+    nl_counts = {"old": 0, "new": 0}
     lines = _split_diff_lines(diff)
     i = 0
     while i < len(lines):
         line = lines[i]
+        meta = _classify_header_line(line)
+        if meta == "newline-marker":
+            if last_side is None:
+                raise DiffRejected("no-newline marker is not attached to a hunk line", "rejected_hunk")
+            _note_no_newline(last_side, nl_counts)
+            last_side = None
+            i += 1
+            continue
         if saw_hunk:
             if line == "":
                 if any(rest != "" for rest in lines[i + 1:]):
                     raise DiffRejected("unexpected empty line after hunk", "rejected_hunk")
                 break
-            kind = _after_hunk_line(line)
-            if kind == "allow":
-                i += 1
-                continue
-            if kind == "reject":
+            if meta != "index" and not _is_patch_header(line):
                 raise DiffRejected("unexpected line after hunk", "rejected_hunk")
+        elif meta is None and line != "" and not _is_patch_header(line) and not line.startswith(
+                ("old mode ", "new mode ", "deleted file mode ", "new file mode ",
+                 "rename from ", "rename to ", "copy from ", "copy to ",
+                 "similarity index ", "dissimilarity index ", "index ")):
+            raise DiffRejected("unexpected line before hunk", "rejected_hunk")
         hunk = _HUNK_RE.match(line)
         if hunk:
             saw_hunk = True
+            last_side = None
+            nl_counts = {"old": 0, "new": 0}
             old_left = int(hunk.group(2)) if hunk.group(2) is not None else 1
             new_left = int(hunk.group(4)) if hunk.group(4) is not None else 1
             i += 1
@@ -591,23 +636,32 @@ def validate_diff(diff, cfg, repo_root=None):
                     raise DiffRejected("truncated hunk", "rejected_hunk")
                 body = lines[i]
                 i += 1
-                if body.startswith("\\"):
+                if body == _NO_NEWLINE_MARKER:
+                    if last_side is None:
+                        raise DiffRejected("no-newline marker is not attached to a hunk line", "rejected_hunk")
+                    _note_no_newline(last_side, nl_counts)
+                    last_side = None
                     continue
+                if body.startswith("\\"):
+                    raise DiffRejected("unexpected line after hunk", "rejected_hunk")
                 if body == "" or body.startswith(" "):
                     # git apply treats a completely empty line as context.
                     if old_left <= 0 or new_left <= 0:
                         raise DiffRejected("hunk line counts do not match", "rejected_hunk")
                     old_left -= 1
                     new_left -= 1
+                    last_side = "both"
                 elif body.startswith("+"):
                     if new_left <= 0:
                         raise DiffRejected("hunk line counts do not match", "rejected_hunk")
                     new_left -= 1
                     added.append(body[1:])
+                    last_side = "new"
                 elif body.startswith("-"):
                     if old_left <= 0:
                         raise DiffRejected("hunk line counts do not match", "rejected_hunk")
                     old_left -= 1
+                    last_side = "old"
                 else:
                     raise DiffRejected("malformed hunk line", "rejected_hunk")
             continue
@@ -1026,6 +1080,7 @@ def run(args, cfg, opener=None, clock=time.time, sleep=time.sleep, out=sys.stdou
     rec = {"task_id": args.task_id or None, "project": args.project, "model": None,
            "dry_run": bool(args.dry_run), "prompt_sha256": None}
     outcome_rc = EXIT_INTERNAL
+    interrupted = None
     try:
         check_model(model)
         rec["model"] = model
@@ -1147,14 +1202,23 @@ def run(args, cfg, opener=None, clock=time.time, sleep=time.sleep, out=sys.stdou
         rec["outcome"] = "internal_error"
         print("ERROR: internal error", file=sys.stderr)
         outcome_rc = EXIT_INTERNAL
+    except BaseException as exc:
+        # Actions sends SIGINT on cancel. Keep one ledger row for a billed call, then re-raise.
+        rec["outcome"] = "interrupted"
+        interrupted = exc
     ledger_failed = False
     try:
         if not rec.get("timestamp"):
             rec["timestamp"] = utc_now_iso(clock)
         append_ledger(ledger, rec)
     except Exception:
-        # The ledger path or the record must not be echoed; either can carry a secret.
+        # A ledger failure must not replace KeyboardInterrupt or SystemExit.
+        if interrupted is not None:
+            print("ERROR: internal error", file=sys.stderr)
+            raise interrupted
         ledger_failed = True
+    if interrupted is not None:
+        raise interrupted
     if ledger_failed:
         pr = rec.get("pr") if isinstance(rec.get("pr"), str) else ""
         if rec.get("outcome") == "pr_opened" and pr.strip():

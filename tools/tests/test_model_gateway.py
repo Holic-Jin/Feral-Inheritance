@@ -102,6 +102,7 @@ def model_reply(content, usage=None):
 
 
 _REAL_GETADDRINFO = socket.getaddrinfo
+DNS_NAMES = []
 
 
 def _host_of(address):
@@ -125,24 +126,14 @@ def _ip_is_loopback(host):
 
 
 def _is_loopback(address):
-    """True only when every resolved address is a loopback IP. Names are resolved, not trusted."""
+    """Literal loopback IPs and the name localhost. Every other name is rejected with no DNS."""
     host = _host_of(address)
-    if host in (None, ""):
+    if not isinstance(host, str) or host == "":
         return False
+    if host.lower() == "localhost":
+        return True
     literal = _ip_is_loopback(host)
-    if literal is not None:
-        return literal
-    try:
-        infos = _REAL_GETADDRINFO(host, None)
-    except socket.gaierror:
-        return False
-    if not infos:
-        return False
-    for info in infos:
-        ip = info[4][0]
-        if _ip_is_loopback(ip) is not True:
-            return False
-    return True
+    return bool(literal)
 
 
 class Base(unittest.TestCase):
@@ -157,17 +148,38 @@ class Base(unittest.TestCase):
         env["HTTP_PROXY"] = "http://192.0.2.1:9"
         env["HTTPS_PROXY"] = "http://192.0.2.1:9"
         env["ALL_PROXY"] = "http://192.0.2.1:9"
+        env["NO_PROXY"] = ""
+        env["no_proxy"] = ""
         self.env = mock.patch.dict(os.environ, env, clear=True)
         self.env.start()
         self.repo = make_repo(self.tmp)
         # urlopen is not the only network path: the gateway uses build_opener().open.
         self.net = mock.patch("urllib.request.urlopen", side_effect=AssertionError("real network call"))
         self.net.start()
+        import _socket
         real_create = socket.create_connection
-        real_connect = socket.socket.connect
+        real_connect = _socket.socket.connect
         real_connect_ex = socket.socket.connect_ex
         real_sendto = socket.socket.sendto
         real_sendmsg = socket.socket.sendmsg
+        real_bind = _socket.socket.bind
+        orig_socket_type = _socket.socket
+
+        class _GuardedCSocket(orig_socket_type):
+            def connect(self, address):
+                if not _is_loopback(address):
+                    raise AssertionError("non-loopback connect %r" % (address,))
+                return orig_socket_type.connect(self, address)
+
+            def bind(self, address):
+                if _host_of(address) in ("0.0.0.0", "::"):
+                    raise AssertionError("refusing bind to %r" % (address,))
+                return orig_socket_type.bind(self, address)
+
+        # The C type itself is immutable, so replace the name callers look up.
+        _socket.socket = _GuardedCSocket
+        self._orig_socket_type = orig_socket_type
+        self._socket_mod = _socket
 
         def guarded_create(address, *args, **kwargs):
             if not _is_loopback(address):
@@ -211,7 +223,15 @@ class Base(unittest.TestCase):
         def guarded_getaddrinfo(host, port, *args, **kwargs):
             if host not in (None, "", b"") and not _is_loopback((host, port)):
                 raise AssertionError("non-loopback getaddrinfo %r" % (host,))
+            if isinstance(host, str) and _ip_is_loopback(host) is None:
+                DNS_NAMES.append(host)
             return _REAL_GETADDRINFO(host, port, *args, **kwargs)
+
+        def guarded_bind(sock, address):
+            host = _host_of(address)
+            if host in ("0.0.0.0", "::"):
+                raise AssertionError("refusing bind to %r" % (address,))
+            return real_bind(sock, address)
 
         self._socket_guards = [
             mock.patch("socket.create_connection", guarded_create),
@@ -219,6 +239,7 @@ class Base(unittest.TestCase):
             mock.patch.object(socket.socket, "connect_ex", guarded_connect_ex),
             mock.patch.object(socket.socket, "sendto", guarded_sendto),
             mock.patch.object(socket.socket, "sendmsg", guarded_sendmsg),
+            mock.patch.object(socket.socket, "bind", guarded_bind),
             mock.patch("socket.getaddrinfo", guarded_getaddrinfo),
         ]
         for guard in self._socket_guards:
@@ -228,6 +249,8 @@ class Base(unittest.TestCase):
     def tearDown(self):
         for guard in reversed(getattr(self, "_socket_guards", [])):
             guard.stop()
+        if getattr(self, "_socket_mod", None) is not None:
+            self._socket_mod.socket = self._orig_socket_type
         self.net.stop()
         self.env.stop()
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -1003,10 +1026,16 @@ class TestQaFixes(Base):
         for benign in ("Definis", "infinis", "the fin is sharp", "finish", "finish the ability"):
             with self.subTest(benign=benign):
                 self.assertFalse(gw.mentions_finismundi(benign), benign)
-        self.assertEqual(gw._fold_for_finismundi("3"), "e")
-        for folded in ("\u03dcinis", "\u03ddinis", "\ua730inis", "\u0192inis", "F\u0131nis", "Finls"):
+        for folded in ("\u03dcinis", "\u03ddinis", "\ua730inis", "\u0192inis", "\ua799inis",
+                       "F\u0131nis", "f\u026anis", "fini\ua731", "F1nls", "Finl5", "F!nls", "finl$"):
             with self.subTest(folded=folded):
                 self.assertTrue(gw.mentions_finismundi(folded), repr(folded))
+        for plain in ("flnis", "finls", "fl-nis", "nvidia/fl-nis", "Finls"):
+            with self.subTest(plain=plain):
+                self.assertFalse(gw.mentions_finismundi(plain), plain)
+        self.assertTrue(gw.mentions_finismundi("Finis3Mundi"))
+        self.assertTrue(gw.mentions_finismundi("FinisXMundi"))
+        self.assertFalse(gw.mentions_finismundi("FinisXYZMundi"))
 
     def test_full_finismundi_matches_inside_other_words(self):
         embedded = (
@@ -1069,6 +1098,39 @@ class TestQaFixes(Base):
         hidden = diff_for("Source/Foo.cs") + "index 1111111..2222222 " + FAKE_NV_KEY + "\n" + diff_for("Source/Bar.cs")
         with self.assertRaises(gw.SecretDetected):
             gw.validate_diff(hidden, self.cfg, self.repo)
+        before = (
+            "diff --git a/Source/Foo.cs b/Source/Foo.cs\n"
+            "index 1111111..2222222 " + FAKE_NV_KEY + "\n"
+            "--- a/Source/Foo.cs\n"
+            "+++ b/Source/Foo.cs\n"
+            "@@ -1 +1 @@\n"
+            "-a\n"
+            "+b\n"
+        )
+        with self.assertRaises(gw.SecretDetected):
+            gw.validate_diff(before, self.cfg, self.repo)
+        binary = (
+            "diff --git a/Source/Foo.cs b/Source/Foo.cs\n"
+            "Binary files a/Source/Foo.cs and b/Source/Foo.cs differ\n"
+        )
+        with self.assertRaises(gw.DiffRejected) as cm:
+            gw.validate_diff(binary, self.cfg, self.repo)
+        self.assertEqual(cm.exception.outcome, "rejected_binary")
+        with self.assertRaises(gw.DiffRejected):
+            gw.validate_diff("Binary files not the git form\n" + diff_for("Source/Foo.cs"), self.cfg, self.repo)
+        two = (
+            "diff --git a/Source/Foo.cs b/Source/Foo.cs\n"
+            "--- a/Source/Foo.cs\n"
+            "+++ b/Source/Foo.cs\n"
+            "@@ -2 +0,0 @@\n"
+            "-a\n"
+            "\\ No newline at end of file\n"
+            "-b\n"
+            "\\ No newline at end of file\n"
+        )
+        with self.assertRaises(gw.DiffRejected) as cm:
+            gw.validate_diff(two, self.cfg, self.repo)
+        self.assertEqual(cm.exception.outcome, "rejected_hunk")
 
     def test_ledger_failure_after_pr_names_the_pr_and_interrupts_propagate(self):
         def opener(req, timeout=None):
@@ -1088,12 +1150,41 @@ class TestQaFixes(Base):
         self.assertIn("test.yml was not dispatched", err)
         self.assertNotIn(secret, out + err)
         self.assertNotIn("Traceback", err)
-        with mock.patch.object(gw, "check_model", side_effect=KeyboardInterrupt):
-            with self.assertRaises(KeyboardInterrupt):
-                self.run_gw(self.args("--task", "x", "--dry-run"))
-        with mock.patch.object(gw, "check_model", side_effect=SystemExit(3)):
-            with self.assertRaises(SystemExit):
-                self.run_gw(self.args("--task", "x", "--dry-run"))
+
+    def _interrupt_during(self, exc, where):
+        def opener(req, timeout=None):
+            if "integrate.api.nvidia.com" in req.full_url:
+                if where == "model":
+                    raise exc
+                return model_reply("```diff\n" + GOOD_DIFF + "```")
+            if req.full_url.endswith("/pulls"):
+                if where == "pr":
+                    raise exc
+                return FakeResp({"html_url": "https://github.com/Holic-Jin/Feral-Inheritance/pull/4"}, 201)
+            raise AssertionError("unexpected URL " + req.full_url)
+
+        with mock.patch.dict(os.environ, {"NVIDIA_API_KEY": FAKE_NV_KEY, "GITHUB_TOKEN": FAKE_GH_TOKEN}):
+            with self.assertRaises(type(exc)):
+                self.run_gw(self.args("--task", "bump X", "--files", "Source/Foo.cs"), opener=opener)
+        rows = self.ledger()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["outcome"], "interrupted")
+        if where == "pr":
+            self.assertEqual(rows[0]["prompt_tokens"], 111)
+            self.assertEqual(rows[0]["completion_tokens"], 22)
+        else:
+            self.assertIsNone(rows[0]["prompt_tokens"])
+
+    def test_interrupt_during_model_call_and_pr_is_logged_once(self):
+        self._interrupt_during(KeyboardInterrupt(), "model")
+        # fresh ledger: the helper above already consumed this repo's log, so use a new file via another run
+        # after deleting the log
+        os.remove(os.path.join(self.repo, ".gateway", "calls.jsonl"))
+        self._interrupt_during(SystemExit(2), "model")
+        os.remove(os.path.join(self.repo, ".gateway", "calls.jsonl"))
+        self._interrupt_during(KeyboardInterrupt(), "pr")
+        os.remove(os.path.join(self.repo, ".gateway", "calls.jsonl"))
+        self._interrupt_during(SystemExit("cancel"), "pr")
 
     def test_model_segments_and_fullmatch(self):
         gw.check_model("moonshotai/kimi-k2.6")
@@ -1133,12 +1224,18 @@ class TestQaFixes(Base):
                 sock.sendto(b"x", blocked)
             with self.assertRaises(AssertionError):
                 sock.sendmsg([b"x"], [], 0, blocked)
+            with self.assertRaises(AssertionError):
+                sock.bind(("0.0.0.0", 0))
+            import _socket
+            with self.assertRaises(AssertionError):
+                _socket.socket.connect(sock, blocked)
         finally:
             sock.close()
         with self.assertRaises(AssertionError):
             socket.getaddrinfo("192.0.2.1", 9)
         self.assertTrue(_is_loopback(("127.0.0.1", 9)))
         self.assertTrue(_is_loopback(("localhost", 9)))
+        self.assertFalse(_is_loopback(("example.com", 9)))
         self.assertFalse(_is_loopback(blocked))
         denied = subprocess.run(
             ["git", "ls-remote", "https://192.0.2.1/not-a-repo"],
