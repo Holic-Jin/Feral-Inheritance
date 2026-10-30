@@ -43,6 +43,9 @@ permissions: {}
 
 # One gateway run at a time, so parallel runs cannot exceed the 40 calls/minute limit
 # (the rate-limit state file lives only for the length of one job).
+# cancel-in-progress: false leaves the running job alone. GitHub keeps only one
+# queued run in the group: a newer trigger cancels the previously queued run
+# and takes its place. There is no separate queue-length setting.
 concurrency:
   group: model-call
   cancel-in-progress: false
@@ -59,6 +62,9 @@ jobs:
       pr: ${{ steps.publish.outputs.pr }}
     # only the reviewed gateway on main may run
     if: github.ref == 'refs/heads/main'
+    # NVIDIA_API_KEY is an environment secret. The user creates nvidia-gateway
+    # and limits its deployment branches to main. This file does not create it.
+    environment: nvidia-gateway
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -93,13 +99,11 @@ jobs:
         # The job is ephemeral, so the call log is kept as the run's step summary.
         # actions/upload-artifact is NOT used: it has no review in csharp-tools-review.md.
         # (Resolved for later review: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0)
-        # The log has metadata only: task_id, timestamp, model, prompt_sha256, token usage, outcome.
+        # summarize-log escapes table cells (newlines, control characters, '|', HTML)
+        # and re-encodes the JSONL. The raw file is not concatenated into the summary.
         if: always()
         run: |
           python3 tools/model_gateway.py --summarize-log "${RUNNER_TEMP}/gateway/calls.jsonl" >> "$GITHUB_STEP_SUMMARY"
-          echo '```json' >> "$GITHUB_STEP_SUMMARY"
-          cat "${RUNNER_TEMP}/gateway/calls.jsonl" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Expose created branch and PR number
         id: publish

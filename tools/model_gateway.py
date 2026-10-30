@@ -22,8 +22,8 @@ Hard rules (not configurable):
   * a branch is never reused: if the computed branch name already exists
     locally or on origin, the run is refused.
 
-Exit codes: 0 ok, 2 policy refusal, 3 model/API error, 4 invalid diff,
-5 git / GitHub error, 6 usage error.
+Exit codes: 0 ok, 1 internal error, 2 policy refusal, 3 model/API error,
+4 invalid diff, 5 git / GitHub error, 6 usage error.
 """
 
 import argparse
@@ -38,6 +38,7 @@ import re
 import subprocess
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 
@@ -45,12 +46,18 @@ TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIG = os.path.join(TOOLS_DIR, "gateway_config.json")
 GITHUB_API = "https://api.github.com"
 
-EXIT_OK, EXIT_POLICY, EXIT_API, EXIT_DIFF, EXIT_GIT, EXIT_USAGE = 0, 2, 3, 4, 5, 6
+EXIT_OK, EXIT_INTERNAL, EXIT_POLICY, EXIT_API, EXIT_DIFF, EXIT_GIT, EXIT_USAGE = 0, 1, 2, 3, 4, 5, 6
 
 # --------------------------------------------------------------------------
 # Hard-coded policy
 # --------------------------------------------------------------------------
-FORBIDDEN_PROJECT_RE = re.compile(r"finis[\s_.\-]*mundi", re.IGNORECASE)
+# finis + mundi after NFKC, format-character stripping and leet folding.
+# Separators may sit between letters. "finis" alone matches (Fin1s, f-i-n-i-s);
+# "finish" does not.
+_FINIS_WORD = r"[\W_]*".join("finis")
+_MUNDI_WORD = r"[\W_]*".join("mundi")
+FORBIDDEN_PROJECT_RE = re.compile(
+    _FINIS_WORD + r"(?:" + _MUNDI_WORD + r"|[\W_]+" + _MUNDI_WORD + r"|(?![\w]))")
 
 # Projects that may ever be sent to the model API. Config can only narrow this.
 ALLOWED_PROJECTS = ("feral-inheritance",)
@@ -114,6 +121,8 @@ HARD_DENIED_GLOBS = [
 ]
 
 TASK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
+MODEL_RE = re.compile(r"^[A-Za-z0-9._/-]{1,100}$")
+PR_TITLE_MAX = 120
 BRANCH_PREFIX = "model/"
 # model/<task-id>-<UTC timestamp>, timestamp from time.strftime("%Y%m%dT%H%M%SZ", gmtime).
 # Job B of model-call.yml hard-codes this same pattern and refuses any other ref.
@@ -193,11 +202,36 @@ def load_config(path=DEFAULT_CONFIG):
     return cfg
 
 
+def _fold_for_finismundi(value):
+    """NFKC, drop format/zero-width characters, lowercase, then 1→i and 0→o."""
+    text = unicodedata.normalize("NFKC", str(value))
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
+    return text.lower().translate(str.maketrans({"1": "i", "0": "o"}))
+
+
 def mentions_finismundi(*values):
-    for v in values:
-        if v and FORBIDDEN_PROJECT_RE.search(str(v)):
+    """True if any value names FinisMundi, including obfuscated spellings.
+
+    Used for the project, task, task id, model, target repo name
+    (``github_repo`` and ``GITHUB_REPOSITORY``) and file paths.
+    """
+    for value in values:
+        if value and FORBIDDEN_PROJECT_RE.search(_fold_for_finismundi(value)):
             return True
     return False
+
+
+def check_model(model):
+    """Refuse a model id that is not a short token, contains controls, or looks like a secret."""
+    if not isinstance(model, str):
+        raise PolicyError("refused: invalid model id", "refused_model")
+    if any(ch in "\r\n" or unicodedata.category(ch)[0] == "C" for ch in model):
+        raise PolicyError("refused: model id contains a newline or control character", "refused_model")
+    if MODEL_RE.fullmatch(model) is None:
+        raise PolicyError("refused: model id must match %s" % MODEL_RE.pattern, "refused_model")
+    if mentions_finismundi(model):
+        raise PolicyError("refused: FinisMundi", "refused_finismundi")
+    assert_no_secrets("model", model)
 
 
 def check_project(project, cfg, repo_root=None, extra=()):
@@ -377,18 +411,59 @@ def _strip_prefix(p):
     raise DiffRejected("rejected path %r: expected a/ or b/ prefix" % p, "rejected_path")
 
 
+_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
 def validate_diff(diff, cfg, repo_root=None):
     """Strict textual validation. Returns sorted list of touched paths.
 
-    Deliberately over-strict: header-like lines anywhere are treated as headers.
+    Hunk bodies are consumed using the @@ line counts. A removed source line
+    that starts with ``-- `` is therefore content (diff line ``--- ...``),
+    not a second file header.
     """
     if len(diff.encode("utf-8")) > int(cfg.get("max_diff_bytes", 200000)):
         raise DiffRejected("diff too large", "rejected_size")
     if "\x00" in diff:
         raise DiffRejected("diff contains NUL bytes (binary)", "rejected_binary")
     paths = set()
+    added = []
     saw_hunk = False
-    for line in diff.splitlines():
+    lines = diff.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        hunk = _HUNK_RE.match(line)
+        if hunk:
+            saw_hunk = True
+            old_left = int(hunk.group(2)) if hunk.group(2) is not None else 1
+            new_left = int(hunk.group(4)) if hunk.group(4) is not None else 1
+            i += 1
+            while old_left or new_left:
+                if i >= len(lines):
+                    raise DiffRejected("truncated hunk", "rejected_hunk")
+                body = lines[i]
+                i += 1
+                if body.startswith("\\"):
+                    continue
+                if body.startswith("+"):
+                    if new_left <= 0:
+                        raise DiffRejected("hunk line counts do not match", "rejected_hunk")
+                    new_left -= 1
+                    added.append(body[1:])
+                elif body.startswith("-"):
+                    if old_left <= 0:
+                        raise DiffRejected("hunk line counts do not match", "rejected_hunk")
+                    old_left -= 1
+                elif body.startswith(" "):
+                    if old_left <= 0 or new_left <= 0:
+                        raise DiffRejected("hunk line counts do not match", "rejected_hunk")
+                    old_left -= 1
+                    new_left -= 1
+                else:
+                    raise DiffRejected("malformed hunk line", "rejected_hunk")
+            continue
+        if line.startswith("@@"):
+            raise DiffRejected("unparseable hunk header", "rejected_hunk")
         if line.startswith("GIT binary patch") or (line.startswith("Binary files ") and line.endswith(" differ")):
             raise DiffRejected("binary patches are not allowed", "rejected_binary")
         if line.startswith(("old mode ", "new mode ", "deleted file mode ", "rename from ", "rename to ",
@@ -397,6 +472,7 @@ def validate_diff(diff, cfg, repo_root=None):
         if line.startswith("new file mode "):
             if line.strip() != "new file mode 100644":
                 raise DiffRejected("new file must be mode 100644 (no executables/symlinks)", "rejected_mode")
+            i += 1
             continue
         if line.startswith("index ") and re.search(r"\s(?!100644)\d{6}$", line):
             raise DiffRejected("unexpected file mode in index line", "rejected_mode")
@@ -407,19 +483,18 @@ def validate_diff(diff, cfg, repo_root=None):
             a, b = _strip_prefix(m.group(1)), _strip_prefix(m.group(2))
             if a != b:
                 raise DiffRejected("renames are not allowed", "rejected_mode")
-            paths.add(a)
+            if a is not None:
+                paths.add(a)
         elif line.startswith("--- ") or line.startswith("+++ "):
             p = _strip_prefix(line[4:])
             if p is not None:
                 paths.add(p)
-        elif line.startswith("@@"):
-            saw_hunk = True
+        i += 1
     if not paths or not saw_hunk:
         raise DiffRejected("diff has no file headers or hunks", "rejected_no_diff")
     for p in sorted(paths):
         check_write_path(p, cfg, repo_root)
-    added = "\n".join(l[1:] for l in diff.splitlines() if l.startswith("+") and not l.startswith("+++ "))
-    hits = find_secrets(added, live_secret_values())
+    hits = find_secrets("\n".join(added), live_secret_values())
     if hits:
         raise SecretDetected("model diff contains a possible secret (%s)" % ", ".join(hits), "rejected_secret_in_diff")
     return sorted(paths)
@@ -515,8 +590,34 @@ def append_ledger(path, record):
     return rec
 
 
+def summary_cell(value):
+    """One markdown table cell: no newlines, control characters, or raw ``|`` / HTML."""
+    if value is None:
+        return "null"
+    chars = []
+    for ch in str(value):
+        cat = unicodedata.category(ch)
+        if cat[0] == "C" or cat in ("Zl", "Zp") or ch in "\r\n":
+            chars.append(" ")
+        elif ch == "|":
+            chars.append("\\|")
+        elif ch == "`":
+            chars.append("'")
+        elif ch == "<":
+            chars.append("&lt;")
+        elif ch == ">":
+            chars.append("&gt;")
+        else:
+            chars.append(ch)
+    return "".join(chars).strip()
+
+
 def summarize_log(path, out=sys.stdout):
-    """Markdown table of the call log (metadata only) for $GITHUB_STEP_SUMMARY."""
+    """Markdown table of the call log (metadata only) for $GITHUB_STEP_SUMMARY.
+
+    Cell values are escaped. The JSONL block is re-encoded, not copied raw, so a
+    field cannot break the table or the fence.
+    """
     rows = []
     if os.path.isfile(path):
         with open(path, encoding="utf-8") as f:
@@ -530,11 +631,18 @@ def summarize_log(path, out=sys.stdout):
     print("| task_id | timestamp (UTC) | model | outcome | prompt_tokens | completion_tokens | total_tokens "
           "| prompt_sha256 | branch |", file=out)
     print("|---|---|---|---|---|---|---|---|---|", file=out)
-    cell = lambda v: "null" if v is None else str(v).replace("|", "/")
+    keys = ("task_id", "timestamp", "model", "outcome", "prompt_tokens", "completion_tokens", "total_tokens",
+            "prompt_sha256", "branch")
     for r in rows:
-        print("| " + " | ".join(cell(r.get(k)) for k in ("task_id", "timestamp", "model", "outcome",
-                                                         "prompt_tokens", "completion_tokens", "total_tokens",
-                                                         "prompt_sha256", "branch")) + " |", file=out)
+        print("| " + " | ".join(summary_cell(r.get(k)) for k in keys) + " |", file=out)
+    print("", file=out)
+    print("```json", file=out)
+    for r in rows:
+        safe = {}
+        for k, v in r.items():
+            safe[k] = summary_cell(v) if isinstance(v, str) else v
+        print(json.dumps(safe, ensure_ascii=True, sort_keys=True), file=out)
+    print("```", file=out)
     return len(rows)
 
 
@@ -553,6 +661,30 @@ def prompt_sha256(messages):
     return hashlib.sha256(json.dumps(messages, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """Any 3xx is an error. Authorization is not sent to the Location host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, "redirect refused", headers, fp)
+
+
+def http_opener():
+    """Open one URL with no proxy and no redirects. Callable as opener(request, timeout=)."""
+    director = urllib.request.build_opener(urllib.request.ProxyHandler({}), _RefuseRedirects)
+
+    def _open(req, timeout=60):
+        return director.open(req, timeout=timeout)
+
+    return _open
+
+
+def _response_status(resp):
+    status = getattr(resp, "status", None)
+    if status is None:
+        status = getattr(resp, "code", 200)
+    return int(status)
+
+
 def call_model(messages, model, cfg, api_key, opener=None):
     if not api_key:
         raise ApiError("NVIDIA_API_KEY is not set", "api_no_key")
@@ -560,12 +692,18 @@ def call_model(messages, model, cfg, api_key, opener=None):
                        "max_tokens": cfg.get("max_tokens", 4096), "stream": False}).encode("utf-8")
     req = urllib.request.Request(cfg["endpoint"], data=body, method="POST", headers={
         "Authorization": "Bearer " + api_key, "Content-Type": "application/json", "Accept": "application/json"})
-    opener = opener or urllib.request.urlopen
+    opener = opener or http_opener()
     try:
         with opener(req, timeout=cfg.get("request_timeout_seconds", 180)) as resp:
-            status = getattr(resp, "status", 200)
+            status = _response_status(resp)
+            if 300 <= status < 400:
+                raise ApiError("model API refused redirect HTTP %s" % status, "api_redirect")
+            if not 200 <= status < 300:
+                raise ApiError("model API HTTP %s" % status, "api_http_%s" % status)
             data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
+        if 300 <= e.code < 400:
+            raise ApiError("model API refused redirect HTTP %s" % e.code, "api_redirect")
         raise ApiError("model API HTTP %s" % e.code, "api_http_%s" % e.code)
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         raise ApiError("model API unreachable (%s)" % e.__class__.__name__, "api_network")
@@ -677,22 +815,55 @@ def git_auth_env(token):
             "GIT_CONFIG_VALUE_0": "AUTHORIZATION: basic " + basic, "GIT_TERMINAL_PROMPT": "0"}
 
 
+def sanitize_pr_title(title):
+    """Drop newlines and control characters, then cap the length."""
+    if not isinstance(title, str):
+        title = "" if title is None else str(title)
+    chars = []
+    for ch in title:
+        cat = unicodedata.category(ch)
+        if cat[0] == "C" or cat in ("Zl", "Zp") or ch in "\r\n":
+            chars.append(" ")
+        else:
+            chars.append(ch)
+    title = " ".join("".join(chars).split())
+    if not title:
+        title = "model change"
+    if len(title) > PR_TITLE_MAX:
+        title = title[:PR_TITLE_MAX].rstrip()
+    return title
+
+
 def open_pr(repo, token, head, base, title, body, draft=True, opener=None):
     if mentions_finismundi(repo):
         raise PolicyError("refused: FinisMundi repo", "refused_finismundi")
+    title = sanitize_pr_title(title)
     data = json.dumps({"title": title, "head": head, "base": base, "body": body, "draft": bool(draft)}).encode()
     req = urllib.request.Request("%s/repos/%s/pulls" % (GITHUB_API, repo), data=data, method="POST", headers={
         "Authorization": "Bearer " + token, "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json",
         "User-Agent": "feral-model-gateway"})
-    opener = opener or urllib.request.urlopen
+    opener = opener or http_opener()
     try:
         with opener(req, timeout=60) as resp:
-            return json.loads(resp.read().decode("utf-8")).get("html_url", "")
+            status = _response_status(resp)
+            if 300 <= status < 400:
+                raise GitError("GitHub PR creation refused redirect HTTP %s" % status, "pr_redirect")
+            if not 200 <= status < 300:
+                raise GitError("GitHub PR creation failed: HTTP %s" % status, "pr_http_%s" % status)
+            payload = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
+        if 300 <= e.code < 400:
+            raise GitError("GitHub PR creation refused redirect HTTP %s" % e.code, "pr_redirect")
         raise GitError("GitHub PR creation failed: HTTP %s" % e.code, "pr_http_%s" % e.code)
     except (urllib.error.URLError, OSError) as e:
         raise GitError("GitHub unreachable (%s)" % e.__class__.__name__, "pr_network")
+    except ValueError:
+        raise GitError("GitHub PR creation returned non-JSON", "pr_bad_json")
+    url = payload.get("html_url") if isinstance(payload, dict) else ""
+    if not isinstance(url, str) or not url.strip():
+        raise GitError("GitHub PR creation returned no PR URL", "pr_no_url")
+    return url
 
 
 # --------------------------------------------------------------------------
@@ -702,13 +873,13 @@ def run(args, cfg, opener=None, clock=time.time, sleep=time.sleep, out=sys.stdou
     repo_root = os.path.realpath(args.repo_root)
     state_dir = os.path.join(repo_root, cfg.get("state_dir", ".gateway"))
     ledger = args.log_file or os.path.join(state_dir, "calls.jsonl")
-    model = args.model or cfg["default_model"]
-    rec = {"task_id": args.task_id or None, "project": args.project, "model": model,
+    model = args.model or cfg.get("default_model") or ""
+    rec = {"task_id": args.task_id or None, "project": args.project, "model": None,
            "dry_run": bool(args.dry_run), "prompt_sha256": None}
     try:
-        check_project(args.project, cfg, repo_root, extra=[args.task, args.task_id] + list(args.files))
-        if mentions_finismundi(model):
-            raise PolicyError("refused: FinisMundi", "refused_finismundi")
+        check_model(model)
+        rec["model"] = model
+        check_project(args.project, cfg, repo_root, extra=[args.task, args.task_id, model] + list(args.files))
         check_task_id(args.task_id)
         assert_no_secrets("task", args.task)
         base = cfg.get("base_branch", "main")
@@ -804,8 +975,11 @@ def run(args, cfg, opener=None, clock=time.time, sleep=time.sleep, out=sys.stdou
                 "**Needs QA review. Do not merge without owner approval.**"
                 % (args.task_id, args.task.strip()[:500], model, base, rec["base_sha"], rec["prompt_sha256"],
                    ", ".join("`%s`" % p for p in sorted(changed))))
-        rec["pr"] = open_pr(repo, token, branch, base, "[model:%s] %s" % (args.task_id, args.task.strip()[:60]),
-                            body, cfg.get("draft_pr", True), opener)
+        url = open_pr(repo, token, branch, base, "[model:%s] %s" % (args.task_id, args.task.strip()[:60]),
+                      body, cfg.get("draft_pr", True), opener)
+        if not isinstance(url, str) or not url.strip():
+            raise GitError("GitHub PR creation returned no PR URL", "pr_no_url")
+        rec["pr"] = url
         rec["outcome"] = "pr_opened"
         print("PR: %s" % rec["pr"], file=out)
         return EXIT_OK
@@ -817,6 +991,11 @@ def run(args, cfg, opener=None, clock=time.time, sleep=time.sleep, out=sys.stdou
                   "git push origin --delete %s (remote) / git branch -D %s (local), then rerun."
                   % (rec["branch"], rec["branch"], rec["branch"]), file=sys.stderr)
         return e.exit_code
+    except Exception:
+        # No traceback: the message can contain the task, a path, or a live key.
+        rec["outcome"] = "internal_error"
+        print("ERROR: internal error", file=sys.stderr)
+        return EXIT_INTERNAL
     finally:
         if not rec.get("timestamp"):
             rec["timestamp"] = utc_now_iso(clock)

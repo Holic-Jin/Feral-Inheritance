@@ -13,8 +13,11 @@ commands and never sees secrets. Nothing merges automatically; the owner merges.
    1. Policy checks, before anything else:
       - The project must be in the hard-coded allowlist (`feral-inheritance` only;
         `tools/gateway_config.json` can only narrow it).
-      - Anything mentioning **FinisMundi** (case-insensitive, also `finis-mundi`, `Finis_Mundi`) is refused
-        in the project, task, task_id, file paths, repo path, repo name and model, even if allowlisted.
+      - Anything mentioning **FinisMundi** is refused in the project, task, task_id, model, file paths,
+        repo path and target repo name (`github_repo` and `GITHUB_REPOSITORY`), even if allowlisted.
+        The check applies NFKC normalization, strips zero-width and other format characters, lowercases,
+        treats `1` as `i` and `0` as `o`, and allows separators between letters (`Fin1s`, `f-i-n-i-s`,
+        `finis-mundi`, fullwidth `ＦｉｎｉｓＭｕｎｄｉ`). `finish` is not a match.
       - `task_id` must match `^[a-z0-9][a-z0-9_-]{0,47}$`.
       - The task text and every context file are scanned for secrets (AWS keys, GitHub
         `ghp_/gho_/github_pat_` tokens, `nvapi-` keys, `sk-` keys, private-key blocks, Slack, Google API keys,
@@ -27,31 +30,43 @@ commands and never sees secrets. Nothing merges automatically; the owner merges.
    3. Context files are read from that branch. Only allowed paths, plus `About/About.xml`, `LoadFolders.xml`
       and `Source/FeralInheritance.csproj` as read-only context, can be sent.
    4. Rate limit: at most **40 calls per rolling 60 s**. State is kept in `.gateway/rate_state.json`
-      (file-locked). The workflow's `concurrency: model-call` group runs one gateway job at a time,
-      because the state file only lives as long as one job.
+      (file-locked). The workflow concurrency group `model-call` sets `cancel-in-progress: false`.
+      GitHub runs one job in that group and keeps only one queued run: a newer trigger cancels the
+      previously queued run, and the running job is left alone. There is no extra queue-length
+      setting. The state file only lives as long as one job, which is why a second run must wait.
    5. It calls `https://integrate.api.nvidia.com/v1/chat/completions`. The default model is
-      `moonshotai/kimi-k2.6`. The key comes from env `NVIDIA_API_KEY` only and is never printed or logged.
+      `moonshotai/kimi-k2.6`. A caller-supplied model id must match `^[A-Za-z0-9._/-]{1,100}$`,
+      must not contain a newline or other control character, and is passed through the secret filter.
+      The key comes from the `nvidia-gateway` environment secret `NVIDIA_API_KEY` only and is never
+      printed or logged. urllib is configured with no proxy and a redirect handler that refuses every
+      3xx, so the `Authorization` header is not sent to another host.
    6. The model is asked for a unified diff only. The gateway extracts it and validates it: allowed paths,
       deny list, traversal, symlinks, binaries, mode changes, renames, copies, deletes, and secrets in the
-      added lines. It then cross-checks with `git apply --numstat --summary --check`.
+      added lines. Hunk bodies are parsed by the `@@` line counts, so a removed line that starts with
+      `-- ` is content, not a file header. It then cross-checks with `git apply --numstat --summary --check`.
       **If any file in the diff is denied, the whole diff is rejected.**
    7. It runs `git apply`, re-checks `git status`, commits as `feral-model-gateway`, pushes the branch with
       `GITHUB_TOKEN` (as a per-command header, never stored in `.git/config`) and opens a **draft PR** through
-      the GitHub REST API (`urllib`).
+      the GitHub REST API (`urllib`). The PR title has newlines and control characters stripped and is capped
+      at 120 characters. A 3xx response or an empty PR URL is an error and is not recorded as `pr_opened`.
    8. **Call log:** one append-only JSONL line per run, written whether the run succeeds or is refused.
       Every line has `task_id`, `timestamp` (UTC), `model`, `prompt_sha256`, `prompt_tokens`,
       `completion_tokens`, `total_tokens` (each `null` when the API's `usage` is missing or malformed) and
       `outcome`. Optional fields are `project`, `http_status`, `duration_ms`, `dry_run`, `paths`, `branch`,
       `base_sha` and `pr`. Prompt and response bodies and keys are never logged. In Actions the log is
-      written to `$RUNNER_TEMP/gateway/calls.jsonl` and printed to the run's **step summary** as a
-      token-usage table plus the raw JSONL. `actions/upload-artifact` is not used yet because it has not
-      been reviewed.
+      written to `$RUNNER_TEMP/gateway/calls.jsonl` and printed to the run's **step summary** by
+      `--summarize-log` only. Table cells have newlines and control characters removed, and `|`,
+      backticks, `<` and `>` escaped. The JSONL in the summary is re-encoded, not concatenated raw.
+      An unexpected exception is logged as `outcome=internal_error` with no traceback (exit code 1).
+      `actions/upload-artifact` is not used yet because it has not been reviewed.
 3. Job B of **model-call** dispatches **test.yml** on that branch. See "Test dispatch" below.
    `test.yml` itself is unchanged: `pull_request`, `push` to `main`, and `workflow_dispatch`.
 4. QA reviews. The owner decides and merges.
 
-Exit codes: 0 ok, 2 policy refusal (FinisMundi, allowlist, secret, rate limit, task_id), 3 model/API error,
-4 invalid or denied diff, 5 git/GitHub error (including `branch_exists`, `git_dirty_worktree`), 6 usage.
+Exit codes: 0 ok, 1 internal error (no traceback), 2 policy refusal (FinisMundi, allowlist, secret,
+rate limit, task_id, model id), 3 model/API error (including a refused redirect), 4 invalid or denied diff,
+5 git/GitHub error (including `branch_exists`, `git_dirty_worktree`, a refused PR redirect, or an empty PR URL),
+6 usage.
 
 Local use:
 
@@ -169,8 +184,13 @@ release notes on every bump.
    - Require status checks to pass, and add exactly **`test (1.6)`** and **`test (1.7)`**. They appear after
      the first workflow run on `main`.
    - Block force pushes, and block deletion.
-3. Under **Settings → Secrets and variables → Actions → New repository secret**, add **`NVIDIA_API_KEY`**.
-   Type it yourself; it is never stored on the shared computer.
+3. Under **Settings → Environments**, create an environment named **`nvidia-gateway`**.
+   - Limit **Deployment branches** to **`main`** only.
+   - Add **`NVIDIA_API_KEY`** as an **environment secret** on `nvidia-gateway`. Do not add it as a
+     repository secret.
+   - Type it yourself; it is never stored on the shared computer.
+   The gateway job sets `environment: nvidia-gateway` and still runs only when `github.ref` is
+   `refs/heads/main`. This repository file does not create the environment.
 4. Under **Settings → Actions → General**:
    - Set Workflow permissions to **Read repository contents**; each workflow asks for more explicitly.
    - Enable **Allow GitHub Actions to create and approve pull requests**, which the gateway needs to open PRs.
@@ -193,7 +213,7 @@ as `{workflow_id}` and requires the **Actions: write** permission
 
 | Job | id | Token | Secrets | What it does |
 |---|---|---|---|---|
-| A | `gateway` | `contents: write`, `pull-requests: write` | `NVIDIA_API_KEY` only | The existing gateway. On `pr_opened` it publishes the branch name and the PR number as job outputs. A dry run, a refusal, or any run that did not open a PR leaves the branch output empty. |
+| A | `gateway` | `contents: write`, `pull-requests: write` | `NVIDIA_API_KEY` environment secret on `nvidia-gateway` only | The existing gateway (`environment: nvidia-gateway`, still `if: github.ref == refs/heads/main`). On `pr_opened` it publishes the branch name and the PR number as job outputs. A dry run, a refusal, or any run that did not open a PR leaves the branch output empty. |
 | B | `dispatch-tests` | `actions: write` only | none, and no checkout | `needs: gateway`, and runs only when `success() && needs.gateway.outputs.branch != ''`. |
 
 Job B checks the branch against `model/<task-id>-<UTC timestamp>` (`task-id` is

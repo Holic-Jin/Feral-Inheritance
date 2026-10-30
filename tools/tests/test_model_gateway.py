@@ -11,7 +11,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -743,7 +745,11 @@ class TestWorkflowContract(unittest.TestCase):
         self.assertIn("contents: write", gateway)
         self.assertIn("pull-requests: write", gateway)
         self.assertIn("NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}", gateway)
+        self.assertIn("environment: nvidia-gateway", gateway)
+        self.assertIn("if: github.ref == 'refs/heads/main'", gateway)
+        self.assertIn("cancel-in-progress: false", text)
         self.assertNotIn("actions: write", gateway)
+        self.assertNotIn("cat \"${RUNNER_TEMP}/gateway/calls.jsonl\"", text)
         self.assertIn("needs: gateway", dispatch)
         self.assertIn("success() && needs.gateway.outputs.branch != ''", dispatch)
         self.assertIn("actions: write", dispatch)
@@ -765,6 +771,205 @@ class TestWorkflowContract(unittest.TestCase):
         self.assertIn("workflow_dispatch:", text)
         self.assertIn("name: test (${{ matrix.rimworld }})", text)
         self.assertIn('rimworld: ["1.6", "1.7"]', text)
+
+
+class TestQaFixes(Base):
+    def test_finismundi_obfuscation_and_repo_paths(self):
+        variants = (
+            "FinisMundi",
+            "finis-mundi",
+            "Finis\u200bMundi",
+            "f\u200bi\u200dn\u200bi\u200ds",
+            "ＦｉｎｉｓＭｕｎｄｉ",
+            "Fin1s",
+            "f-i-n-i-s",
+            "Fin1sMundi",
+            "f-i-n-i-s-m-u-n-d-i",
+            "Source/ＦｉｎｉｓＭｕｎｄｉ.cs",
+        )
+        for value in variants:
+            with self.subTest(value=value):
+                self.assertTrue(gw.mentions_finismundi(value), value)
+        self.assertEqual(gw._fold_for_finismundi("Fin1s-Mund0"), "finis-mundo")
+        self.assertFalse(gw.mentions_finismundi("finish the ability"))
+        self.assertFalse(gw.mentions_finismundi("finish"))
+        self.assertFalse(gw.mentions_finismundi("feral-inheritance"))
+        with mock.patch.dict(os.environ, {"GITHUB_REPOSITORY": "someone/Fin1s"}):
+            with self.assertRaises(gw.PolicyError) as cm:
+                gw.check_project("feral-inheritance", self.cfg)
+            self.assertEqual(cm.exception.outcome, "refused_finismundi")
+        with self.assertRaises(gw.PolicyError):
+            gw.open_pr("acme/f-i-n-i-s", "t", "h", "main", "title", "body", opener=mock.Mock())
+        with self.assertRaises(gw.DiffRejected):
+            gw.check_write_path("Source/f-i-n-i-s.cs", self.cfg)
+        with self.assertRaises(gw.DiffRejected):
+            gw.check_write_path("Common/Defs/Fin1s.xml", self.cfg)
+
+    def test_removed_double_dash_line_is_not_a_file_header(self):
+        diff = (
+            "diff --git a/Source/Foo.cs b/Source/Foo.cs\n"
+            "--- a/Source/Foo.cs\n"
+            "+++ b/Source/Foo.cs\n"
+            "@@ -1,3 +1,2 @@\n"
+            " kept\n"
+            "--- a removed comment starting with two dashes\n"
+            " kept-too\n"
+        )
+        self.assertEqual(gw.validate_diff(diff, self.cfg, self.repo), ["Source/Foo.cs"])
+
+    def test_model_id_rules(self):
+        gw.check_model("moonshotai/kimi-k2.6")
+        for bad in ("", "has space", "a\nb", "a\rb", "bad\x00id", "x" * 101, "name$extra"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(gw.PolicyError) as cm:
+                    gw.check_model(bad)
+                self.assertEqual(cm.exception.outcome, "refused_model")
+        with self.assertRaises(gw.PolicyError) as cm:
+            gw.check_model(FAKE_NV_KEY)
+        self.assertEqual(cm.exception.outcome, "refused_secret")
+        opener = mock.Mock()
+        rc, _, err = self.run_gw(self.args("--task", "x", "--dry-run", "--model", "bad model"), opener=opener)
+        self.assertEqual(rc, gw.EXIT_POLICY)
+        self.assertNotIn("bad model", err)
+        opener.assert_not_called()
+        self.assertIsNone(self.ledger()[-1]["model"])
+        rc, _, err = self.run_gw(self.args("--task", "x", "--dry-run", "--model", FAKE_NV_KEY), opener=opener)
+        self.assertEqual(rc, gw.EXIT_POLICY)
+        self.assertNotIn(FAKE_NV_KEY, err)
+        self.assertNotIn(FAKE_NV_KEY, json.dumps(self.ledger()))
+
+    def test_internal_error_is_logged_without_traceback(self):
+        secret = "traceback-" + FAKE_NV_KEY
+        with mock.patch.object(gw, "build_messages", side_effect=RuntimeError(secret)):
+            rc, out, err = self.run_gw(self.args("--task", "x", "--dry-run"))
+        self.assertEqual(rc, gw.EXIT_INTERNAL)
+        self.assertEqual(self.ledger()[-1]["outcome"], "internal_error")
+        self.assertNotIn(secret, out + err)
+        self.assertNotIn("Traceback", err)
+        self.assertNotIn("RuntimeError", err)
+
+    def test_summary_cells_are_escaped(self):
+        path = os.path.join(self.tmp, "calls.jsonl")
+        gw.append_ledger(path, {
+            "task_id": "t1",
+            "outcome": "ok",
+            "model": "evil|model\n<script>",
+            "branch": "model/t1\r-x",
+        })
+        buf = io.StringIO()
+        gw.summarize_log(path, buf)
+        text = buf.getvalue()
+        self.assertNotIn("<script>", text)
+        self.assertIn("&lt;script&gt;", text)
+        self.assertIn("evil\\|model", text)
+        self.assertIn("```json", text)
+
+    def test_pr_title_strips_controls_and_caps_length(self):
+        title = gw.sanitize_pr_title("bad\r\ntitle\x00\u2028" + ("x" * 200))
+        self.assertNotIn("\n", title)
+        self.assertNotIn("\r", title)
+        self.assertNotIn("\x00", title)
+        self.assertNotIn("\u2028", title)
+        self.assertLessEqual(len(title), gw.PR_TITLE_MAX)
+        self.assertTrue(title.startswith("bad title"))
+        captured = []
+
+        def opener(req, timeout=None):
+            captured.append(json.loads(req.data.decode()))
+            return FakeResp({"html_url": "https://github.com/Holic-Jin/Feral-Inheritance/pull/9"})
+
+        url = gw.open_pr("Holic-Jin/Feral-Inheritance", "t", "model/t1-20261026T000000Z", "main",
+                         "line1\nline2", "body", opener=opener)
+        self.assertEqual(url, "https://github.com/Holic-Jin/Feral-Inheritance/pull/9")
+        self.assertEqual(captured[0]["title"], "line1 line2")
+
+    def test_empty_or_redirect_response_is_not_a_pr_url(self):
+        with self.assertRaises(gw.GitError) as cm:
+            gw.open_pr("Holic-Jin/Feral-Inheritance", "t", "h", "main", "title", "body",
+                       opener=lambda req, timeout=None: FakeResp({}, 200))
+        self.assertEqual(cm.exception.outcome, "pr_no_url")
+        with self.assertRaises(gw.GitError) as cm:
+            gw.open_pr("Holic-Jin/Feral-Inheritance", "t", "h", "main", "title", "body",
+                       opener=lambda req, timeout=None: FakeResp(
+                           {"html_url": "https://github.com/Holic-Jin/Feral-Inheritance/pull/1"}, 302))
+        self.assertEqual(cm.exception.outcome, "pr_redirect")
+
+    def test_redirects_do_not_leak_authorization(self):
+        marker_key = "local-marker-key"
+        marker_token = "local-marker-token"
+
+        class Origin(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                if length:
+                    self.rfile.read(length)
+                self.server.seen.append(self.headers.get("Authorization"))
+                self.send_response(self.server.status_code)
+                self.send_header("Location", self.server.location)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, fmt, *args):
+                return
+
+        class Sink(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                payload = self.rfile.read(length) if length else b""
+                self.server.seen.append((self.headers.get("Authorization"), payload))
+                raw = b'{"choices":[{"message":{"content":"stolen"}}],"html_url":"http://sink/pull/1"}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def log_message(self, fmt, *args):
+                return
+
+        def serve(handler):
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            server.seen = []
+            server.thread = threading.Thread(target=server.serve_forever, daemon=True)
+            server.thread.start()
+            return server
+
+        sink = serve(Sink)
+        origin = serve(Origin)
+        try:
+            sink_url = "http://127.0.0.1:%d/sink" % sink.server_address[1]
+            origin.location = sink_url
+            origin_root = "http://127.0.0.1:%d" % origin.server_address[1]
+            for code in (301, 302, 303):
+                with self.subTest(code=code):
+                    origin.status_code = code
+                    origin.seen.clear()
+                    sink.seen.clear()
+                    cfg = dict(self.cfg, endpoint=origin_root + "/v1/chat/completions", request_timeout_seconds=5)
+                    with self.assertRaises(gw.ApiError) as cm:
+                        gw.call_model([{"role": "user", "content": "x"}], "moonshotai/kimi-k2.6", cfg, marker_key)
+                    self.assertEqual(cm.exception.outcome, "api_redirect")
+                    self.assertNotIn(marker_key, str(cm.exception))
+                    self.assertEqual(sink.seen, [])
+                    self.assertTrue(origin.seen)
+                    self.assertTrue(all(marker_key in (auth or "") for auth in origin.seen))
+                    origin.seen.clear()
+                    with mock.patch.object(gw, "GITHUB_API", origin_root):
+                        with self.assertRaises(gw.GitError) as cm:
+                            gw.open_pr("Holic-Jin/Feral-Inheritance", marker_token, "model/t1-20261026T000000Z",
+                                       "main", "title", "body")
+                    self.assertEqual(cm.exception.outcome, "pr_redirect")
+                    self.assertNotIn(marker_token, str(cm.exception))
+                    self.assertEqual(sink.seen, [])
+                    self.assertTrue(origin.seen)
+                    self.assertTrue(all(marker_token in (auth or "") for auth in origin.seen))
+        finally:
+            origin.shutdown()
+            sink.shutdown()
+            origin.server_close()
+            sink.server_close()
+            origin.thread.join(timeout=2)
+            sink.thread.join(timeout=2)
 
 
 if __name__ == "__main__":
