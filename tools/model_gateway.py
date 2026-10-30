@@ -221,7 +221,7 @@ _FINIS_CONFUSABLES = str.maketrans({
     "\u03dd": "f",  # ϝ greek digamma (lower of Ϝ)
     "\ua730": "f",  # ꜰ latin small capital f
     "\u0192": "f",  # ƒ
-    "\ua799": "f",  # 
+    "\ua799": "f",  # latin small f with stroke
     # Cyrillic lookalikes
     "\u0456": "i",  # і
     "\u0457": "i",  # ї
