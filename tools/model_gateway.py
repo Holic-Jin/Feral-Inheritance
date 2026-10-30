@@ -51,15 +51,17 @@ EXIT_OK, EXIT_INTERNAL, EXIT_POLICY, EXIT_API, EXIT_DIFF, EXIT_GIT, EXIT_USAGE =
 # --------------------------------------------------------------------------
 # Hard-coded policy
 # --------------------------------------------------------------------------
-# Standalone "finis" or "finismundi" after NFKD, dropping combining marks, and
-# mapping confusable letters. Separators may sit between letters, but whitespace
-# may sit only between the two words, so "fin is" is not a match. Word boundaries
-# keep Definis and infinis from matching. "finish" does not match.
-_FINIS_LETTER_SEP = r"[._/\-]*"
-_FINIS_WORD = _FINIS_LETTER_SEP.join("finis")
-_MUNDI_WORD = _FINIS_LETTER_SEP.join("mundi")
+# The full name matches anywhere (xFinisMundi, FinisMundi2, spaced letters).
+# Standalone "finis" keeps word boundaries so Definis, infinis and "fin is"
+# do not match. Whitespace is a separator only inside the full name.
+_FINIS_TIGHT_SEP = r"[._/\-]*"
+_FINIS_LOOSE_SEP = r"[._/\-\s]*"
+_FINIS_TIGHT = _FINIS_TIGHT_SEP.join("finis")
+_FINIS_LOOSE = _FINIS_LOOSE_SEP.join("finis")
+_MUNDI_LOOSE = _FINIS_LOOSE_SEP.join("mundi")
 FORBIDDEN_PROJECT_RE = re.compile(
-    r"(?<![a-z0-9])(?:" + _FINIS_WORD + r"[._/\-\s]*" + _MUNDI_WORD + r"|" + _FINIS_WORD + r")(?![a-z0-9])")
+    _FINIS_LOOSE + _FINIS_LOOSE_SEP + _MUNDI_LOOSE
+    + r"|(?<![a-z0-9])" + _FINIS_TIGHT + r"(?![a-z0-9])")
 
 # Line separators other than LF. A single CR immediately before LF is CRLF and is allowed.
 _BAD_LINE_SEPS = ("\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
@@ -209,9 +211,14 @@ def load_config(path=DEFAULT_CONFIG):
 
 # Homoglyphs and leet swaps applied after NFKD, Mn/Cf stripping, and lowercasing.
 _FINIS_CONFUSABLES = str.maketrans({
-    "1": "i", "!": "i", "|": "i",
+    "1": "i", "!": "i", "|": "i", "l": "i",
+    "\u0131": "i",  # ı dotless i
     "0": "o",
     "5": "s", "$": "s",
+    "3": "e",
+    "\u03dd": "f",  # ϝ greek digamma (lower of Ϝ)
+    "\ua730": "f",  # ꜰ latin small capital f
+    "\u0192": "f",  # ƒ
     # Cyrillic lookalikes
     "\u0456": "i",  # і
     "\u0457": "i",  # ї
@@ -242,8 +249,8 @@ _FINIS_CONFUSABLES = str.maketrans({
 def _fold_for_finismundi(value):
     """NFKD, drop combining marks and format characters, lowercase, then confusables.
 
-    Confusables include Cyrillic and Greek lookalikes, 5→s, ! and |→i, $→s,
-    and the existing 1→i and 0→o swaps.
+    Confusables include Cyrillic and Greek lookalikes, Ϝ/ꜰ/ƒ→f, ı and l→i,
+    5→s, ! and |→i, $→s, 3→e, and the existing 1→i and 0→o swaps.
     """
     text = unicodedata.normalize("NFKD", str(value))
     text = "".join(ch for ch in text if unicodedata.category(ch) not in ("Mn", "Cf"))
@@ -504,6 +511,9 @@ def _split_diff_lines(diff):
     return lines
 
 
+_NO_NEWLINE_MARKER = "\\ No newline at end of file"
+
+
 def _is_patch_header(line):
     return (
         line.startswith("diff --git ")
@@ -512,9 +522,33 @@ def _is_patch_header(line):
         or line.startswith("@@")
         or line.startswith(("old mode ", "new mode ", "deleted file mode ", "new file mode ",
                             "rename from ", "rename to ", "copy from ", "copy to ",
-                            "similarity index ", "dissimilarity index ", "index ",
-                            "GIT binary patch", "Binary files ", "\\"))
+                            "similarity index ", "dissimilarity index "))
     )
+
+
+def _after_hunk_line(line):
+    """Classify a line that follows a completed hunk.
+
+    ``index``, ``\\`` and ``Binary`` lines are not silently ignored: only the
+    exact no-newline marker is allowed among them. ``index`` lines are
+    secret-scanned and then parsed normally (a later file may have one).
+    Binary lines and any other ``\\`` line are rejected.
+    """
+    if line == _NO_NEWLINE_MARKER:
+        return "allow"
+    suspicious = (line.startswith("index ") or line.startswith("\\")
+                  or line.startswith("GIT binary patch") or line.startswith("Binary files "))
+    if suspicious:
+        hits = find_secrets(line, live_secret_values())
+        if hits:
+            raise SecretDetected(
+                "model diff contains a possible secret (%s)" % ", ".join(hits), "rejected_secret_in_diff")
+        if line.startswith("\\"):
+            raise DiffRejected("unexpected line after hunk", "rejected_hunk")
+        return "parse"
+    if _is_patch_header(line):
+        return "parse"
+    return "reject"
 
 
 def validate_diff(diff, cfg, repo_root=None):
@@ -540,7 +574,11 @@ def validate_diff(diff, cfg, repo_root=None):
                 if any(rest != "" for rest in lines[i + 1:]):
                     raise DiffRejected("unexpected empty line after hunk", "rejected_hunk")
                 break
-            if not _is_patch_header(line):
+            kind = _after_hunk_line(line)
+            if kind == "allow":
+                i += 1
+                continue
+            if kind == "reject":
                 raise DiffRejected("unexpected line after hunk", "rejected_hunk")
         hunk = _HUNK_RE.match(line)
         if hunk:
@@ -1032,72 +1070,70 @@ def run(args, cfg, opener=None, clock=time.time, sleep=time.sleep, out=sys.stdou
                 print("[dry-run] diff OK, would touch: %s" % ", ".join(rec["paths"]), file=out)
             rec["outcome"] = "dry_run"
             outcome_rc = EXIT_OK
-            return EXIT_OK
+        else:
+            api_key = os.environ.get("NVIDIA_API_KEY", "")
+            if not api_key:
+                raise ApiError("NVIDIA_API_KEY is not set", "api_no_key")
+            limiter = RateLimiter(os.path.join(state_dir, "rate_state.json"), cfg.get("rate_limit_per_minute", 40),
+                                  60.0, clock, sleep, cfg.get("rate_limit_wait", True),
+                                  cfg.get("max_rate_wait_seconds", 90))
+            limiter.acquire()
+            rec["timestamp"] = utc_now_iso(clock)
+            t0 = time.monotonic()
+            try:
+                content, usage, status = call_model(messages, model, cfg, api_key, opener)
+            finally:
+                rec["duration_ms"] = int((time.monotonic() - t0) * 1000)
+            rec["http_status"] = status
+            rec.update(usage_fields(usage))
 
-        api_key = os.environ.get("NVIDIA_API_KEY", "")
-        if not api_key:
-            raise ApiError("NVIDIA_API_KEY is not set", "api_no_key")
-        limiter = RateLimiter(os.path.join(state_dir, "rate_state.json"), cfg.get("rate_limit_per_minute", 40),
-                              60.0, clock, sleep, cfg.get("rate_limit_wait", True),
-                              cfg.get("max_rate_wait_seconds", 90))
-        limiter.acquire()
-        rec["timestamp"] = utc_now_iso(clock)
-        t0 = time.monotonic()
-        try:
-            content, usage, status = call_model(messages, model, cfg, api_key, opener)
-        finally:
-            rec["duration_ms"] = int((time.monotonic() - t0) * 1000)
-        rec["http_status"] = status
-        rec.update(usage_fields(usage))
+            diff = extract_diff(content)
+            rec["paths"] = validate_diff(diff, cfg, repo_root)
+            os.makedirs(state_dir, exist_ok=True)
+            diff_path = os.path.join(state_dir, "model.diff")
+            with open(diff_path, "w", encoding="utf-8") as f:
+                f.write(diff)
+            git_check_numstat(repo_root, diff_path, cfg)
 
-        diff = extract_diff(content)
-        rec["paths"] = validate_diff(diff, cfg, repo_root)
-        os.makedirs(state_dir, exist_ok=True)
-        diff_path = os.path.join(state_dir, "model.diff")
-        with open(diff_path, "w", encoding="utf-8") as f:
-            f.write(diff)
-        git_check_numstat(repo_root, diff_path, cfg)
+            branch = rec["branch"]
+            git(repo_root, "apply", "--whitespace=nowarn", diff_path)
+            changed = set()
+            for line in git(repo_root, "status", "--porcelain", "-uall").stdout.splitlines():
+                changed.add(line[3:].strip())
+            for p in changed:
+                check_write_path(p, cfg, repo_root)
+            if not changed:
+                raise DiffRejected("diff applied but produced no changes", "rejected_no_change")
+            git(repo_root, "add", "--", *sorted(changed))
+            msg = "model(%s): %s\n\nmodel: %s\nprompt_sha256: %s\nbase: origin/%s@%s\n" % (
+                args.task_id, args.task.strip().splitlines()[0][:60], model, rec["prompt_sha256"], base, rec["base_sha"])
+            git(repo_root, "-c", "user.name=feral-model-gateway",
+                "-c", "user.email=feral-model-gateway@users.noreply.github.com", "commit", "-q", "-m", msg)
 
-        branch = rec["branch"]
-        git(repo_root, "apply", "--whitespace=nowarn", diff_path)
-        changed = set()
-        for line in git(repo_root, "status", "--porcelain", "-uall").stdout.splitlines():
-            changed.add(line[3:].strip())
-        for p in changed:
-            check_write_path(p, cfg, repo_root)
-        if not changed:
-            raise DiffRejected("diff applied but produced no changes", "rejected_no_change")
-        git(repo_root, "add", "--", *sorted(changed))
-        msg = "model(%s): %s\n\nmodel: %s\nprompt_sha256: %s\nbase: origin/%s@%s\n" % (
-            args.task_id, args.task.strip().splitlines()[0][:60], model, rec["prompt_sha256"], base, rec["base_sha"])
-        git(repo_root, "-c", "user.name=feral-model-gateway",
-            "-c", "user.email=feral-model-gateway@users.noreply.github.com", "commit", "-q", "-m", msg)
-
-        if args.no_pr:
-            rec["outcome"] = "committed_local"
-            print("committed on %s (no push / no PR)" % branch, file=out)
-            outcome_rc = EXIT_OK
-            return EXIT_OK
-        token = os.environ.get("GITHUB_TOKEN", "")
-        if not token:
-            raise GitError("GITHUB_TOKEN is not set", "git_no_token")
-        repo = os.environ.get("GITHUB_REPOSITORY") or cfg.get("github_repo")
-        check_project(args.project, cfg, repo_root, extra=[repo])
-        git(repo_root, "push", "origin", "%s:refs/heads/%s" % (branch, branch), env=git_auth_env(token))
-        body = ("Automated change from `tools/model_gateway.py`.\n\n- Task ID: `%s`\n- Task: %s\n"
-                "- Model: `%s` (NVIDIA API)\n- Base: `origin/%s` @ `%s`\n- prompt_sha256: `%s`\n- Files: %s\n\n"
-                "**Needs QA review. Do not merge without owner approval.**"
-                % (args.task_id, args.task.strip()[:500], model, base, rec["base_sha"], rec["prompt_sha256"],
-                   ", ".join("`%s`" % p for p in sorted(changed))))
-        url = open_pr(repo, token, branch, base, "[model:%s] %s" % (args.task_id, args.task.strip()[:60]),
-                      body, cfg.get("draft_pr", True), opener)
-        if not isinstance(url, str) or not url.strip():
-            raise GitError("GitHub PR creation returned no PR URL", "pr_no_url")
-        rec["pr"] = url
-        rec["outcome"] = "pr_opened"
-        print("PR: %s" % rec["pr"], file=out)
-        outcome_rc = EXIT_OK
-        return EXIT_OK
+            if args.no_pr:
+                rec["outcome"] = "committed_local"
+                print("committed on %s (no push / no PR)" % branch, file=out)
+                outcome_rc = EXIT_OK
+            else:
+                token = os.environ.get("GITHUB_TOKEN", "")
+                if not token:
+                    raise GitError("GITHUB_TOKEN is not set", "git_no_token")
+                repo = os.environ.get("GITHUB_REPOSITORY") or cfg.get("github_repo")
+                check_project(args.project, cfg, repo_root, extra=[repo])
+                git(repo_root, "push", "origin", "%s:refs/heads/%s" % (branch, branch), env=git_auth_env(token))
+                body = ("Automated change from `tools/model_gateway.py`.\n\n- Task ID: `%s`\n- Task: %s\n"
+                        "- Model: `%s` (NVIDIA API)\n- Base: `origin/%s` @ `%s`\n- prompt_sha256: `%s`\n- Files: %s\n\n"
+                        "**Needs QA review. Do not merge without owner approval.**"
+                        % (args.task_id, args.task.strip()[:500], model, base, rec["base_sha"], rec["prompt_sha256"],
+                           ", ".join("`%s`" % p for p in sorted(changed))))
+                url = open_pr(repo, token, branch, base, "[model:%s] %s" % (args.task_id, args.task.strip()[:60]),
+                              body, cfg.get("draft_pr", True), opener)
+                if not isinstance(url, str) or not url.strip():
+                    raise GitError("GitHub PR creation returned no PR URL", "pr_no_url")
+                rec["pr"] = url
+                rec["outcome"] = "pr_opened"
+                print("PR: %s" % rec["pr"], file=out)
+                outcome_rc = EXIT_OK
     except GatewayError as e:
         rec["outcome"] = e.outcome
         print("ERROR: %s" % e, file=sys.stderr)
@@ -1106,24 +1142,31 @@ def run(args, cfg, opener=None, clock=time.time, sleep=time.sleep, out=sys.stdou
                   "git push origin --delete %s (remote) / git branch -D %s (local), then rerun."
                   % (rec["branch"], rec["branch"], rec["branch"]), file=sys.stderr)
         outcome_rc = e.exit_code
-        return e.exit_code
     except Exception:
         # No traceback: the message can contain the task, a path, or a live key.
         rec["outcome"] = "internal_error"
         print("ERROR: internal error", file=sys.stderr)
         outcome_rc = EXIT_INTERNAL
-        return EXIT_INTERNAL
-    finally:
-        try:
-            if not rec.get("timestamp"):
-                rec["timestamp"] = utc_now_iso(clock)
-            append_ledger(ledger, rec)
-        except Exception:
-            # The ledger path or the record must not be echoed; either can carry a secret.
+    ledger_failed = False
+    try:
+        if not rec.get("timestamp"):
+            rec["timestamp"] = utc_now_iso(clock)
+        append_ledger(ledger, rec)
+    except Exception:
+        # The ledger path or the record must not be echoed; either can carry a secret.
+        ledger_failed = True
+    if ledger_failed:
+        pr = rec.get("pr") if isinstance(rec.get("pr"), str) else ""
+        if rec.get("outcome") == "pr_opened" and pr.strip():
+            number = re.search(r"/pull/(\d+)$", pr)
+            where = "%s (#%s)" % (pr, number.group(1)) if number else pr
+            print("ERROR: PR is open at %s; test.yml was not dispatched. "
+                  "Dispatch test.yml on that branch." % where, file=sys.stderr)
+        else:
             print("ERROR: internal error", file=sys.stderr)
-            if outcome_rc == EXIT_OK:
-                outcome_rc = EXIT_INTERNAL
-            return outcome_rc
+        if outcome_rc == EXIT_OK:
+            outcome_rc = EXIT_INTERNAL
+    return outcome_rc
 
 
 def parse_args(argv):

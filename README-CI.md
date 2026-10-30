@@ -16,10 +16,10 @@ commands and never sees secrets. Nothing merges automatically; the owner merges.
       - Anything mentioning **FinisMundi** is refused in the project, task, task_id, model, file paths,
         repo path and target repo name (`github_repo` and `GITHUB_REPOSITORY`), even if allowlisted.
         The check applies NFKD, strips combining marks and format characters, lowercases, and maps
-        confusables (Cyrillic and Greek lookalikes, `5`→`s`, `!` and `|`→`i`, `$`→`s`, plus `1`→`i` and
-        `0`→`o`). It matches standalone `finis` and `finismundi` on word boundaries, with separators
-        allowed between letters (`Fin1s`, `f-i-n-i-s`, `finis-mundi`, fullwidth `ＦｉｎｉｓＭｕｎｄｉ`).
-        `finish`, `Definis`, `infinis` and the phrase `fin is` are not matches.
+        confusables (Cyrillic and Greek lookalikes, `Ϝ`/`ꜰ`/`ƒ`→`f`, `ı` and `l`→`i`, `5`→`s`,
+        `!` and `|`→`i`, `$`→`s`, `3`→`e`, plus `1`→`i` and `0`→`o`). The full name matches anywhere,
+        including inside `xFinisMundi` or `FinisMundi2` and with spaces between letters. Standalone
+        `finis` still requires a word boundary, so `finish`, `Definis`, `infinis` and `fin is` are not matches.
       - `task_id` must match `^[a-z0-9][a-z0-9_-]{0,47}$`.
       - The task text and every context file are scanned for secrets (AWS keys, GitHub
         `ghp_/gho_/github_pat_` tokens, `nvapi-` keys, `sk-` keys, private-key blocks, Slack, Google API keys,
